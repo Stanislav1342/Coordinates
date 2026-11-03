@@ -29,6 +29,25 @@ from utils import wait_overlays_gone, stable_click
 logger = logging.getLogger(__name__)
 
 
+RUSSIAN_MONTHS = {
+    "январь": 1, "февраль": 2, "март": 3, "апрель": 4,
+    "май": 5, "июнь": 6, "июль": 7, "август": 8,
+    "сентябрь": 9, "октябрь": 10, "ноябрь": 11, "декабрь": 12,
+}
+
+
+def _parse_month_header(text: str) -> Tuple[int, int]:
+    """Парсит заголовок месяца вида 'Октябрь 2026' в (year, month)."""
+    parts = text.strip().split()
+    if len(parts) >= 2:
+        m_name = parts[0].lower()
+        y_num = int(parts[1])
+        m_num = RUSSIAN_MONTHS.get(m_name)
+        if m_num:
+            return y_num, m_num
+    raise ValueError(f"Не удалось распознать заголовок месяца: '{text}'")
+
+
 @dataclass
 class DeliveryPoint:
     index: str
@@ -96,8 +115,8 @@ class AdvantumService:
     def _apply_date_filter(
         self, start_date: datetime.date, end_date: datetime.date
     ) -> bool:
-        """Устанавливает диапазон дат в фильтре Advantum."""
-        # Проверяем, развернута ли панель фильтров
+        """Устанавливает диапазон дат в фильтре Advantum с перемоткой месяцев."""
+        # 1. Проверяем, развернута ли панель фильтров
         filter_fields = self.driver.find_elements(
             By.XPATH, "//div[contains(@class, 'MuiPickersTextField-root')]"
         )
@@ -116,7 +135,7 @@ class AdvantumService:
             except Exception:
                 pass
 
-        # Проверяем текущее значение
+        # 2. Проверяем текущее значение
         try:
             period_input = self.driver.find_element(
                 By.XPATH, "//div[contains(@class, 'MuiPickersTextField-root')]//input"
@@ -130,7 +149,7 @@ class AdvantumService:
         except Exception:
             pass
 
-        print(f"[Advantum] Установка периода: {start_date} — {end_date}...")
+        print(f"[Advantum] Открытие календаря для периода: {start_date.strftime('%d.%m.%Y')} — {end_date.strftime('%d.%m.%Y')}...")
         cal_btn = self.wait.until(
             EC.element_to_be_clickable(
                 (By.XPATH, "//div[contains(@class, 'MuiPickersTextField-root')]//button")
@@ -139,59 +158,126 @@ class AdvantumService:
         self.driver.execute_script("arguments[0].click();", cal_btn)
         time.sleep(1.5)
 
-        # Ожидаем появления календаря
+        # 3. Ожидаем появления календаря и считываем отображаемый месяц
         self.wait.until(
             EC.presence_of_all_elements_located(
                 (By.XPATH, "//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')]")
             )
         )
 
-        # Кликаем дату начала в Container 0
+        left_lbl = self.wait.until(
+            EC.visibility_of_element_located(
+                (
+                    By.XPATH,
+                    "//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][1]//span[contains(@class, 'MuiTypography-subtitle1')]",
+                )
+            )
+        ).text
+        cur_year, cur_month = _parse_month_header(left_lbl)
+        month_delta = (start_date.year - cur_year) * 12 + (start_date.month - cur_month)
+        print(f"[Advantum] Календарь открыт на: {left_lbl} ({cur_month}.{cur_year}), целевой месяц: {start_date.month}.{start_date.year}, сдвиг: {month_delta}")
+
+        # Переключаем назад, если целевой месяц раньше текущего
+        if month_delta < 0:
+            for _ in range(abs(month_delta)):
+                prev_btn = self.wait.until(
+                    EC.element_to_be_clickable(
+                        (
+                            By.XPATH,
+                            "//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][1]//button[contains(@class, 'MuiPickersArrowSwitcher-previousIconButton')]",
+                        )
+                    )
+                )
+                self.driver.execute_script("arguments[0].click();", prev_btn)
+                time.sleep(0.3)
+        # Переключаем вперед, если целевой месяц позже текущего
+        elif month_delta > 0:
+            for _ in range(month_delta):
+                next_btn = self.wait.until(
+                    EC.element_to_be_clickable(
+                        (
+                            By.XPATH,
+                            "//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][2]//button[contains(@class, 'MuiPickersArrowSwitcher-nextIconButton')]",
+                        )
+                    )
+                )
+                self.driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(0.3)
+
+        time.sleep(0.5)
+
+        # 4. Кликаем день даты начала в Container 1 (левый контейнер)
         start_day_xpath = (
             f"//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][1]"
             f"//button[@role='gridcell' and normalize-space(text())='{start_date.day}']"
         )
-        try:
-            start_day_btn = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, start_day_xpath))
-            )
-            self.driver.execute_script("arguments[0].click();", start_day_btn)
-        except Exception:
-            pass
-        time.sleep(0.5)
+        start_day_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, start_day_xpath)))
+        self.driver.execute_script("arguments[0].click();", start_day_btn)
+        time.sleep(0.4)
 
-        # Кликаем дату окончания
+        # 5. Кликаем день даты окончания
         end_delta = (end_date.year - start_date.year) * 12 + (end_date.month - start_date.month)
-        container_idx = 1 if end_delta == 0 else 2
-        end_day_xpath = (
-            f"//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][{container_idx}]"
-            f"//button[@role='gridcell' and normalize-space(text())='{end_date.day}']"
-        )
-        try:
-            end_day_btn = self.wait.until(
-                EC.element_to_be_clickable((By.XPATH, end_day_xpath))
+        if end_delta == 0:
+            # Тот же месяц — Container 1
+            end_day_xpath = (
+                f"//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][1]"
+                f"//button[@role='gridcell' and normalize-space(text())='{end_date.day}']"
             )
+            end_day_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, end_day_xpath)))
             self.driver.execute_script("arguments[0].click();", end_day_btn)
-        except Exception:
-            pass
-        time.sleep(0.5)
-
-        # Кнопка 'Применить'
-        try:
-            apply_btn = self.wait.until(
-                EC.element_to_be_clickable(
-                    (
-                        By.XPATH,
-                        "//button[contains(@class, 'MuiButton-root') and contains(text(), 'Применить')]",
+        elif end_delta == 1:
+            # Следующий месяц — Container 2 (он открыт справа)
+            end_day_xpath = (
+                f"//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][2]"
+                f"//button[@role='gridcell' and normalize-space(text())='{end_date.day}']"
+            )
+            end_day_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, end_day_xpath)))
+            self.driver.execute_script("arguments[0].click();", end_day_btn)
+        else:
+            # Более одного месяца вперед — доматываем правый контейнер
+            for _ in range(end_delta - 1):
+                next_btn = self.wait.until(
+                    EC.element_to_be_clickable(
+                        (
+                            By.XPATH,
+                            "//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][2]//button[contains(@class, 'MuiPickersArrowSwitcher-nextIconButton')]",
+                        )
                     )
                 )
+                self.driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(0.3)
+            time.sleep(0.4)
+            end_day_xpath = (
+                f"//div[contains(@class, 'MuiDateRangeCalendar-monthContainer')][2]"
+                f"//button[@role='gridcell' and normalize-space(text())='{end_date.day}']"
             )
-            self.driver.execute_script("arguments[0].click();", apply_btn)
-            time.sleep(2)
+            end_day_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, end_day_xpath)))
+            self.driver.execute_script("arguments[0].click();", end_day_btn)
+
+        time.sleep(0.5)
+
+        # 6. Кнопка 'Применить'
+        print("[Advantum] Нажатие 'Применить' в календаре...")
+        apply_btn = self.wait.until(
+            EC.element_to_be_clickable(
+                (
+                    By.XPATH,
+                    "//button[contains(@class, 'MuiButton-root') and contains(text(), 'Применить')]",
+                )
+            )
+        )
+        self.driver.execute_script("arguments[0].click();", apply_btn)
+        time.sleep(2)
+        wait_overlays_gone(self.driver, timeout=10)
+
+        try:
+            new_val = self.driver.find_element(
+                By.XPATH, "//div[contains(@class, 'MuiPickersTextField-root')]//input"
+            ).get_attribute("value")
+            print(f"[Advantum] Установлен период: {new_val}")
         except Exception:
             pass
 
-        wait_overlays_gone(self.driver, timeout=10)
         return True
 
     def find_and_select_trip(self, trip_number: str) -> bool:
