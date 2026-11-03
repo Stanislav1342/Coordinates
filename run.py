@@ -25,6 +25,8 @@ from browser import create_driver, login_to_advantum
 from config import load_config
 from onec_service import get_onec_service
 from yandex_service import YandexGeocoder, evaluate_coordinates
+from utils import wait_overlays_gone
+from selenium.webdriver.common.by import By
 
 # Настройка логирования
 logging.basicConfig(
@@ -181,14 +183,18 @@ def main():
             # 7.6. Если мы в режиме применения изменений
             if not args.dry_run:
                 # Переключаемся на окно 1С и обновляем координаты
-                success = onec.update_coordinates(
-                    code=p.code,
-                    address=p.address,
-                    lat=geo_res.lat,
-                    lon=geo_res.lon,
-                    radius=args.radius,
-                    client_name=p.name,
-                )
+                try:
+                    success = onec.update_coordinates(
+                        code=p.code,
+                        address=p.address,
+                        lat=geo_res.lat,
+                        lon=geo_res.lon,
+                        radius=args.radius,
+                        client_name=p.name,
+                    )
+                except Exception as e:
+                    print(f"\n [1С] ✗ ОШИБКА: {e}\n [1С] Точка '{p.name}' НЕ обновлена.")
+                    success = False
                 if success:
                     points_updated_in_1c += 1
             else:

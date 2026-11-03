@@ -165,6 +165,82 @@ class WindowsOneCService(OneCServiceInterface):
                 continue
         return results
 
+    def _exact_visible(self, name: str):
+        """Видимые элементы с ТОЧНЫМ текстом name (без учета регистра/пробелов по краям)."""
+        res = []
+        for el in self._find_elements_by_text(name):
+            try:
+                if (el.window_text() or "").strip().lower() == name.lower() and el.is_displayed():
+                    res.append(el)
+            except Exception:
+                continue
+        return res
+
+    def _is_form_open(self, name: str) -> bool:
+        """
+        Проверяет, что в 1С активна форма с заголовком name.
+        Заголовок формы находится в верхней части окна (под шапкой),
+        а нижняя панель открытых вкладок игнорируется (там название есть всегда).
+        """
+        try:
+            win_rect = self.main_win.rectangle()
+            top_zone = win_rect.top + int((win_rect.bottom - win_rect.top) * 0.15)
+            for el in self._exact_visible(name):
+                r = el.rectangle()
+                if r.top < top_zone:
+                    return True
+        except Exception as e:
+            logger.debug("Проверка заголовка формы: %s", e)
+        return False
+
+    def _open_favorite_by_name(self, name: str) -> bool:
+        """
+        Открывает пункт Избранного по точному названию, независимо от его позиции.
+        1) Ищет видимый пункт с точным текстом и кликает по нему.
+        2) Если не найден — вводит название в строку поиска Избранного (Ctrl+F),
+           после чего в списке остаются только совпадения, и снова ищет/кликает.
+        """
+        print(f"[1С:Windows] Поиск раздела '{name}' в списке Избранного...")
+
+        def try_click() -> bool:
+            # Исключаем нижнюю панель открытых вкладок — нужен пункт именно из Избранного
+            try:
+                win_rect = self.main_win.rectangle()
+                bottom_zone = win_rect.bottom - 60
+            except Exception:
+                bottom_zone = 10 ** 9
+            for el in self._exact_visible(name):
+                try:
+                    if el.rectangle().top >= bottom_zone:
+                        continue
+                    el.click_input()
+                    time.sleep(2.0)
+                    return True
+                except Exception:
+                    continue
+            return False
+
+        if try_click():
+            print(f"[1С:Windows] Клик по пункту Избранного '{name}'.")
+            return True
+
+        # Фильтрация списка Избранного через его строку поиска
+        print(f"[1С:Windows] Пункт не виден — фильтрую Избранное по названию '{name}'...")
+        self.send_keys("^f")
+        time.sleep(0.5)
+        set_clipboard(name)
+        self.send_keys("^a^v")
+        time.sleep(1.5)
+
+        if try_click():
+            print(f"[1С:Windows] Клик по пункту Избранного '{name}' (после фильтра).")
+            return True
+
+        # После фильтра в списке остались только совпадения — переходим к первому и открываем
+        self.send_keys("{DOWN}{ENTER}")
+        time.sleep(2.0)
+        return self._is_form_open(name)
+
     def update_coordinates(
         self,
         code: str,
@@ -204,30 +280,19 @@ class WindowsOneCService(OneCServiceInterface):
             self.send_keys("^+b")
             time.sleep(1.2)
 
-        # В открывшейся панели 'Избранное' нажимаем 'Адреса доставки'
-        print("[1С:Windows] Выбор раздела 'Адреса доставки' в Избранном...")
-        clicked_addr = False
-        try:
-            fav_items = self._find_elements_by_text("Адреса доставки")
-            for item in fav_items:
-                try:
-                    if item.is_displayed():
-                        item.click_input()
-                        clicked_addr = True
-                        time.sleep(2.0)
-                        break
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug("Клик по 'Адреса доставки' в списке: %s", e)
+        # В открывшейся панели 'Избранное' ищем раздел 'Адреса доставки' ПО НАЗВАНИЮ
+        # (позиция в списке не важна — сколько бы разделов ни было в Избранном).
+        if not self._open_favorite_by_name("Адреса доставки"):
+            raise RuntimeError(
+                "Не удалось найти раздел 'Адреса доставки' в Избранном 1С. "
+                "Проверьте, что он добавлен в Избранное (звездочка ⭐)."
+            )
 
-        # Если клик по элементу не сработал через UIA:
-        # В открытом меню Избранного 'Адреса доставки' стоит ПЕРВЫМ пунктом и уже в фокусе!
-        # Нажимаем строго ENTER (без стрелок вниз!), чтобы открыть его:
-        if not clicked_addr:
-            print("[1С:Windows] Пункт не нажат кликом, нажимаем Enter для выбора первого пункта Избранного...")
-            self.send_keys("{ENTER}")
-            time.sleep(2.0)
+        # Проверяем, что открылся именно нужный раздел (по заголовку формы)
+        time.sleep(1.0)
+        if not self._is_form_open("Адреса доставки"):
+            raise RuntimeError("После выбора в Избранном не открылась форма 'Адреса доставки'. Остановка, чтобы не изменить чужой раздел.")
+        print("[1С:Windows] ✓ Открыт раздел 'Адреса доставки'.")
 
         # -------------------------------------------------------------
         # ШАГ 2: Поиск строки в разделе 'Адреса доставки'
