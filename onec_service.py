@@ -2,27 +2,38 @@
 onec_service.py — Сервис взаимодействия с 1С:Предприятие.
 
 На Windows:
-Использует pywinauto (UIA backend) для автоматизации действий пользователя в локальном
-клиенте 1С (конфигурация 'ЕИС МСК / Корпоративная информационная система'):
-1. Поиск и активация окна 1С.
-2. Открытие раздела 'Адреса доставки' через Избранное.
-3. Проверка/установка отбора 'Организация = ООО "ФК ПУЛЬС"'.
-4. Поиск строки по адресу или коду МСК...
-5. Открытие карточки -> переход в 'Адресная информация'.
-6. Запись новых значений 'Широта', 'Долгота', 'Радиус зоны'.
-7. Сохранение ('Записать и закрыть') и контроль всплывающего уведомления.
+Использует pywinauto (UIA backend) и системный буфер обмена Windows (через clip.exe),
+что исключает проблемы с переключением раскладки клавиатуры (ENG/RUS).
+1. Активация окна 1С.
+2. Переключение на вкладку 'Адреса доставки' (если открыта внизу или через интерфейс).
+3. Точный поиск по уникальному коду точки (например, МСК000132723) через буфер обмена.
+4. Открытие карточки (Enter).
+5. Переход во вкладку 'Адресная информация'.
+6. Вставка новых значений Широта, Долгота и Радиус через буфер обмена (Ctrl+V).
+7. Сохранение (Ctrl+Enter) и подтверждение.
 
 На macOS / Linux:
-Автоматически включает режим MockOneCService (симулятор) для безопасной отладки
-логики без наличия установленной 1С.
+Автоматически включает режим MockOneCService (симулятор) для безопасной отладки.
 """
 
 import sys
 import time
 import logging
+import subprocess
 from typing import Optional
 
 logger = logging.getLogger(__name__)
+
+
+def set_clipboard(text: str) -> None:
+    """
+    Копирует текст в системный буфер обмена Windows через встроенный clip.exe (UTF-16).
+    Это на 100% исключает ошибки раскладки клавиатуры (ENG/RUS) при вводе текста.
+    """
+    try:
+        subprocess.run(["clip"], input=text.encode("utf-16"), check=True)
+    except Exception as e:
+        logger.warning("Не удалось скопировать текст в буфер через clip: %s", e)
 
 
 class OneCServiceInterface:
@@ -41,10 +52,7 @@ class OneCServiceInterface:
 
 
 class MockOneCService(OneCServiceInterface):
-    """
-    Симулятор 1С для тестирования на macOS.
-    Показывает все действия, которые будут выполнены на Windows.
-    """
+    """Симулятор 1С для тестирования на macOS."""
 
     def update_coordinates(
         self,
@@ -63,19 +71,18 @@ class MockOneCService(OneCServiceInterface):
         print(" [1C-СИМУЛЯТОР / macOS] Эмуляция обновления координат в 1С")
         print("=" * 65)
         print(f" 1. Поиск окна: '(МСК) РМХЦ Хвостов; Интерфейс: / КИС 3.1'")
-        print(f" 2. Открытие раздела: Избранное ⭐ -> 'Адреса доставки'")
-        print(f" 3. Проверка отбора: Организация = 'ООО \"ФК ПУЛЬС\"' (Активен)")
-        print(f" 4. Поиск строки: '{address}' [Код: {code}]")
-        print(f" 5. Открытие карточки: '{client_name or code}' (Двойной клик)")
-        print(f" 6. Переход на вкладку: 'Адресная информация'")
-        print(f" 7. Ввод геоданных:")
+        print(f" 2. Активация вкладки: 'Адреса доставки'")
+        print(f" 3. Точный поиск по коду: '{code}' (или адресу)")
+        print(f" 4. Открытие карточки: '{client_name or code}' (Enter)")
+        print(f" 5. Вкладка: 'Адресная информация'")
+        print(f" 6. Ввод геоданных через буфер обмена (Ctrl+V):")
         print(f"    • Широта:         {lat_str}")
         print(f"    • Долгота:        {lon_str}")
         print(f"    • Радиус зоны:    {rad_str} м")
         print(f"    • Чекбокс:        [x] Координаты проверены")
-        print(f" 8. Нажатие кнопки:   'Записать и закрыть' (Ctrl+Enter)")
+        print(f" 7. Сохранение:       'Записать и закрыть' (Ctrl+Enter)")
         time.sleep(1)
-        print(f" 9. Уведомление 1С:   ✓ 'Изменение: {client_name or code}' получено!")
+        print(f" 8. Уведомление 1С:   ✓ 'Изменение: {client_name or code}'")
         print("=" * 65 + "\n")
         return True
 
@@ -93,22 +100,22 @@ class WindowsOneCService(OneCServiceInterface):
             self.send_keys = send_keys
         except ImportError:
             raise ImportError(
-                "Библиотека pywinauto не установлена! Установите ее на Windows: pip install pywinauto"
+                "Библиотека pywinauto не установлена! Установите ее: pip install pywinauto"
             )
 
     def _find_main_window(self):
-        """Находит главное окно 1С по заголовку."""
+        """Находит главное окно 1С по заголовку и активирует его."""
         import pywinauto
-        # Ищем окно 1С по ключевым словам в заголовке
         windows = pywinauto.findwindows.find_elements(
             title_re=".*(1С:Предприятие|ЕИС МСК|Корпоративная информационная система).*"
         )
         if not windows:
-            raise RuntimeError("Главное окно 1С не найдено! Запустите 1С:Предприятие.")
+            raise RuntimeError("Главное окно 1С не найдено! Убедитесь, что 1С запущена.")
+        
         app = self.app_module(backend="uia").connect(handle=windows[0].handle)
         main_win = app.window(handle=windows[0].handle)
         main_win.set_focus()
-        time.sleep(0.5)
+        time.sleep(0.8)
         return main_win
 
     def update_coordinates(
@@ -120,106 +127,158 @@ class WindowsOneCService(OneCServiceInterface):
         radius: Optional[int] = None,
         client_name: str = "",
     ) -> bool:
-        print(f"[1С:Windows] Подключение к окну 1С для обновления {code}...")
+        print(f"[1С:Windows] Подключение к окну 1С для точки {code or client_name}...")
         main_win = self._find_main_window()
 
-        # 1. Открытие раздела 'Адреса доставки'
-        # Проверяем, открыта ли уже вкладка
+        # 1. Закрываем панель Избранного справа, если она открылась
         try:
-            tab_item = main_win.child_window(title="Адреса доставки", control_type="TabItem")
-            if tab_item.exists():
-                tab_item.click_input()
+            fav_header = main_win.descendants(title="Избранное", control_type="Text")
+            if fav_header:
+                self.send_keys("{ESC}")
                 time.sleep(0.5)
-            else:
-                # Нажимаем звездочку Избранное и выбираем 'Адреса доставки'
-                fav_btn = main_win.child_window(title_re=".*Избранное.*|.*★.*|.*☆.*", control_type="Button")
-                if fav_btn.exists():
-                    fav_btn.click_input()
-                    time.sleep(0.5)
-                    addr_fav = main_win.child_window(title="Адреса доставки", control_type="Hyperlink")
-                    addr_fav.click_input()
-                    time.sleep(1.5)
-        except Exception as e:
-            logger.warning("Переход через вкладку/избранное: %s", e)
-
-        # 2. Поиск строки по адресу (или коду МСК...)
-        print(f"[1С:Windows] Поиск адреса '{address}'...")
-        # Фокусируем список и нажимаем Ctrl+F
-        self.send_keys("^f")
-        time.sleep(0.5)
-        # Вставляем адрес в поле поиска
-        search_text = address
-        self.send_keys(search_text, with_spaces=True)
-        self.send_keys("{ENTER}")
-        time.sleep(2)
-
-        # 3. Открываем найденную строку (Enter)
-        print("[1С:Windows] Открытие карточки адреса...")
-        self.send_keys("{ENTER}")
-        time.sleep(2)
-
-        # 4. Переход на вкладку 'Адресная информация'
-        try:
-            addr_info_tab = main_win.child_window(title="Адресная информация", control_type="TabItem")
-            if addr_info_tab.exists():
-                addr_info_tab.click_input()
-                time.sleep(0.5)
-        except Exception:
-            # Fallback через клавиатуру
-            self.send_keys("^{TAB}")
-            time.sleep(0.5)
-
-        # 5. Заполнение широты и долготы
-        lat_str = f"{lat:.8f}".replace(".", ",")
-        lon_str = f"{lon:.8f}".replace(".", ",")
-
-        print(f"[1С:Windows] Запись координат: Широта={lat_str}, Долгота={lon_str}...")
-        try:
-            lat_edit = main_win.child_window(auto_id_re=".*Широта.*|.*Latitude.*", control_type="Edit")
-            if lat_edit.exists():
-                lat_edit.set_edit_text(lat_str)
-            else:
-                # Клик по полю Широта
-                self.send_keys("^a{BACKSPACE}" + lat_str)
-
-            lon_edit = main_win.child_window(auto_id_re=".*Долгота.*|.*Longitude.*", control_type="Edit")
-            if lon_edit.exists():
-                lon_edit.set_edit_text(lon_str)
-        except Exception as e:
-            logger.warning("Заполнение через auto_id: %s", e)
-
-        # 6. Если передан радиус зоны
-        if radius is not None:
-            print(f"[1С:Windows] Запись радиуса зоны: {radius} м...")
-            try:
-                rad_edit = main_win.child_window(title_re=".*Радиус зоны.*", control_type="Edit")
-                if rad_edit.exists():
-                    rad_edit.set_edit_text(str(radius))
-            except Exception:
-                pass
-
-        # 7. Отметка 'Координаты проверены'
-        try:
-            chk = main_win.child_window(title="Координаты проверены", control_type="CheckBox")
-            if chk.exists() and not chk.get_toggle_state():
-                chk.click_input()
         except Exception:
             pass
 
-        # 8. Сохранение: кнопка 'Записать и закрыть' (Ctrl+Enter)
-        print("[1С:Windows] Нажатие 'Записать и закрыть'...")
-        self.send_keys("^{ENTER}")
+        # 2. Переключение на вкладку 'Адреса доставки'
+        # Проверяем открытые вкладки (вкладка отображается внизу или вверху окна)
+        print("[1С:Windows] Переход на вкладку 'Адреса доставки'...")
+        tab_switched = False
+        try:
+            all_tabs = main_win.descendants(control_type="TabItem")
+            for t in all_tabs:
+                if "Адреса доставки" in t.window_text():
+                    t.click_input()
+                    tab_switched = True
+                    time.sleep(1.2)
+                    break
+        except Exception as e:
+            logger.debug("Поиск по TabItem: %s", e)
+
+        # Если вкладка не найдена в TabItem, ищем по гиперссылке или тексту внизу
+        if not tab_switched:
+            try:
+                addr_elems = main_win.descendants(title_re=".*Адреса доставки.*")
+                for el in addr_elems:
+                    if el.is_displayed():
+                        el.click_input()
+                        tab_switched = True
+                        time.sleep(1.2)
+                        break
+            except Exception as e:
+                logger.debug("Поиск по заголовку элементов: %s", e)
+
+        # 3. Поиск строки в разделе 'Адреса доставки'
+        # Поиск по уникальному коду (например, МСК000132723) на 100% однозначен и мгновенен!
+        search_query = code if code else address
+        print(f"[1С:Windows] Поиск по коду/адресу: '{search_query}'...")
+
+        # Нажимаем Ctrl+F для открытия поиска по списку
+        self.send_keys("^f")
+        time.sleep(0.8)
+
+        # Копируем запрос в буфер обмена и вставляем через Ctrl+V (защита от раскладки клавиатуры!)
+        set_clipboard(search_query)
+        self.send_keys("^v")
+        time.sleep(0.3)
+        self.send_keys("{ENTER}")
         time.sleep(2)
 
-        print(f"[1С:Windows] Карточка '{client_name or code}' успешно сохранена.")
+        # 4. Открываем карточку найденной строки
+        print("[1С:Windows] Открытие карточки найденного адреса (Enter)...")
+        self.send_keys("{ENTER}")
+        time.sleep(2.5)
+
+        # 5. Переход на вкладку 'Адресная информация' внутри карточки
+        print("[1С:Windows] Переход во вкладку 'Адресная информация'...")
+        try:
+            card_tabs = main_win.descendants(control_type="TabItem")
+            for ct in card_tabs:
+                if "Адресная информация" in ct.window_text():
+                    ct.click_input()
+                    time.sleep(1)
+                    break
+        except Exception as e:
+            logger.debug("Поиск вкладки Адресная информация: %s", e)
+
+        # 6. Заполнение полей координат через буфер обмена
+        lat_str = f"{lat:.8f}".replace(".", ",")
+        lon_str = f"{lon:.8f}".replace(".", ",")
+
+        print(f"[1С:Windows] Ввод геоданных: Широта={lat_str}, Долгота={lon_str}...")
+
+        # Ищем метку 'Широта:' и переходим в ее поле по Tab
+        try:
+            lat_labels = main_win.descendants(title_re=".*Широта.*", control_type="Text")
+            if lat_labels:
+                lat_labels[0].click_input()
+                time.sleep(0.3)
+                self.send_keys("{TAB}")  # переход в поле ввода
+                time.sleep(0.2)
+                set_clipboard(lat_str)
+                self.send_keys("^a^v")
+                time.sleep(0.3)
+        except Exception as e:
+            logger.warning("Заполнение Широты через label: %s", e)
+
+        # Ищем метку 'Долгота:' и переходим в ее поле по Tab
+        try:
+            lon_labels = main_win.descendants(title_re=".*Долгота.*", control_type="Text")
+            if lon_labels:
+                lon_labels[0].click_input()
+                time.sleep(0.3)
+                self.send_keys("{TAB}")
+                time.sleep(0.2)
+                set_clipboard(lon_str)
+                self.send_keys("^a^v")
+                time.sleep(0.3)
+        except Exception as e:
+            logger.warning("Заполнение Долготы через label: %s", e)
+
+        # Если передан радиус зоны (например, 300)
+        if radius is not None:
+            print(f"[1С:Windows] Ввод радиуса зоны: {radius} м...")
+            try:
+                rad_labels = main_win.descendants(title_re=".*Радиус зоны.*", control_type="Text")
+                if rad_labels:
+                    rad_labels[0].click_input()
+                    time.sleep(0.3)
+                    self.send_keys("{TAB}")
+                    time.sleep(0.2)
+                    set_clipboard(str(radius))
+                    self.send_keys("^a^v")
+                    time.sleep(0.3)
+            except Exception as e:
+                logger.warning("Заполнение Радиуса через label: %s", e)
+
+        # 7. Чекбокс 'Координаты проверены'
+        try:
+            chks = main_win.descendants(title="Координаты проверены", control_type="CheckBox")
+            if chks:
+                if not chks[0].get_toggle_state():
+                    chks[0].click_input()
+                    time.sleep(0.3)
+        except Exception:
+            pass
+
+        # 8. Сохранение карточки: 'Записать и закрыть' (Ctrl+Enter)
+        print("[1С:Windows] Нажатие 'Записать и закрыть' (Ctrl+Enter)...")
+        # Нажимаем желтую кнопку 'Записать и закрыть' или Ctrl+Enter
+        try:
+            save_btns = main_win.descendants(title="Записать и закрыть", control_type="Button")
+            if save_btns:
+                save_btns[0].click_input()
+            else:
+                self.send_keys("^{ENTER}")
+        except Exception:
+            self.send_keys("^{ENTER}")
+
+        time.sleep(2)
+        print(f"[1С:Windows] ✓ Данные точки '{client_name or code}' успешно сохранены в 1С!")
         return True
 
 
 def get_onec_service() -> OneCServiceInterface:
-    """
-    Фабрика сервиса: на Windows возвращает WindowsOneCService,
-    на macOS / Linux возвращает MockOneCService.
-    """
+    """Фабрика сервиса: на Windows возвращает WindowsOneCService."""
     if sys.platform == "win32":
         try:
             return WindowsOneCService()

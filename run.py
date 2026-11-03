@@ -171,18 +171,34 @@ def main():
         # 8. Пересчет телематики в Advantum
         if points_updated_in_1c > 0 and not args.no_recalc and not args.dry_run:
             print("\n[Advantum] Возврат в окно рейсов и запуск пересчета телематики...")
-            # Если открыто окно карты / вкладка Яндекс Карт — переключаемся на основную вкладку Advantum
             try:
+                # 1. Переключаемся на основную вкладку с Advantum
                 driver.switch_to.window(driver.window_handles[0])
                 time.sleep(1)
-                # Закрываем модальное окно трека (крестик или ESC), чтобы вернуться к строке рейса
-                close_btn = driver.find_elements(By.XPATH, "//div[contains(@class, 'map')]//button[contains(@class, 'close')] | //button[@aria-label='Close']")
-                if close_btn:
-                    driver.execute_script("arguments[0].click();", close_btn[0])
-                    time.sleep(1)
-            except Exception:
-                pass
 
+                # 2. Если открыта страница трека /map — возвращаемся к таблице рейсов
+                if "control/shipments" not in driver.current_url:
+                    print("[Advantum] Возврат из карты трека в таблицу рейсов...")
+                    driver.get("https://atms.advantum.ru/#/control/shipments")
+                    time.sleep(3)
+                    wait_overlays_gone(driver, timeout=10)
+                    # Выбираем рейс снова, чтобы открылась панель инструментов
+                    advantum.find_and_select_trip(args.trip)
+                else:
+                    # Закрываем модальное окно трека, если оно открыто поверх таблицы
+                    close_btns = driver.find_elements(
+                        By.XPATH,
+                        "//div[contains(@class, 'map')]//button[contains(@class, 'close')] | //button[@aria-label='Close']",
+                    )
+                    for cb in close_btns:
+                        if cb.is_displayed():
+                            driver.execute_script("arguments[0].click();", cb)
+                            time.sleep(1)
+                            break
+            except Exception as e:
+                logger.debug("Возврат к таблице рейсов: %s", e)
+
+            time.sleep(1.5)
             recalc_ok = advantum.recalculate_telematics()
             if recalc_ok:
                 print(" [Advantum] ✓ Пересчет телематики успешно запрошен!")
