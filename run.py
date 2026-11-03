@@ -132,27 +132,53 @@ def main():
 
         # 7. Обработка каждой проблемной точки
         for p in failed_points:
-            print("\n" + "-" * 70)
-            print(f" Анализ точки №{p.index}: {p.name} (Код: {p.code or 'нет'})")
+            print("\n" + "=" * 70)
+            print(f" АНАЛИЗ ТОЧКИ №{p.index}: {p.name} (Код: {p.code or 'нет'})")
             print(f" Адрес из Advantum: {p.address}")
-            print("-" * 70)
+            print("=" * 70)
 
-            # 7.1. Открываем трек водителя в Advantum (00..23 часа) и центрируем на точке
-            advantum.open_track_map(point_code=p.code)
+            # 7.1. Открываем трек водителя в Advantum (00..23 часа), центрируем на точке и считываем координаты
+            adv_pos = advantum.open_track_map(point_code=p.code)
+            adv_lat = adv_pos.get("lat")
+            adv_lon = adv_pos.get("lon")
 
             # 7.2. Открываем Яндекс Карты в соседней вкладке браузера для визуальной сверки
             advantum.open_yandex_maps_tab(p.address)
 
-            # 7.3. Геокодирование через Яндекс Карты
+            # 7.3. Получаем точные эталонные координаты здания через Яндекс Карты
             try:
                 geo_res = geocoder.geocode(p.address)
-                print(f" [Геокодер] Найдено:  {geo_res.found_address}")
-                print(f" [Геокодер] Точные координаты: Широта={geo_res.lat:.8f}, Долгота={geo_res.lon:.8f} (источник: {geo_res.source})")
             except Exception as e:
                 logger.error("Не удалось геокодировать адрес '%s': %s", p.address, e)
                 continue
 
-            # 7.4. Если мы в режиме применения изменений (или эмуляции)
+            # 7.4. Сравнение положения точки в Advantum и в Яндекс Картах
+            evaluation = evaluate_coordinates(
+                original_lat=adv_lat,
+                original_lon=adv_lon,
+                target_lat=geo_res.lat,
+                target_lon=geo_res.lon,
+            )
+
+            print("\n" + "-" * 70)
+            print(" РЕЗУЛЬТАТ СРАВНЕНИЯ ЛОКАЦИЙ:")
+            print("-" * 70)
+            if adv_lat and adv_lon:
+                print(f" • Координаты в Advantum (на карте):   Широта: {adv_lat:.8f}, Долгота: {adv_lon:.8f}")
+            else:
+                print(f" • Координаты в Advantum:             (отображаются на открытом треке в браузере)")
+            print(f" • Реальные координаты (Яндекс Карты):  Широта: {geo_res.lat:.8f}, Долгота: {geo_res.lon:.8f}")
+            if evaluation.get("distance_m") is not None:
+                print(f" • Расхождение (дистанция ошибки):      {evaluation['distance_m']} м")
+            print(f" • Вердикт системы:                     {evaluation['reason']}")
+            print("-" * 70)
+
+            # 7.5. Интерактивная пауза для визуального контроля
+            if not args.headless:
+                print("\n[Визуальный контроль] В браузере открыты: 1) вкладка с треком Advantum, 2) вкладка с Яндекс Картами.")
+                input(">>> Проверьте визуально локацию на экране и нажмите Enter для перехода в 1С и обновления...")
+
+            # 7.6. Если мы в режиме применения изменений
             if not args.dry_run:
                 # Переключаемся на окно 1С и обновляем координаты
                 success = onec.update_coordinates(

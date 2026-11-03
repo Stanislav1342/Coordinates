@@ -418,10 +418,12 @@ class AdvantumService:
             print(f"  • Точка №{p.index} [{p.code}]: {p.name} | {p.address}")
         return failed
 
-    def open_track_map(self, point_code: str = "") -> bool:
+    def open_track_map(self, point_code: str = "") -> dict:
         """
         Нажимает кнопку 'На карте' для выбранного рейса,
-        устанавливает фильтр времени (00 до 23 часов) и центрирует на точке.
+        устанавливает фильтр времени (00:xx до 23:xx), обновляет трек
+        и центрирует карту на проблемной точке.
+        Возвращает текущие координаты точки из Advantum, если удалось прочитать.
         """
         print("[Advantum] Открытие трека водителя ('На карте')...")
         wait_overlays_gone(self.driver, timeout=5)
@@ -437,7 +439,7 @@ class AdvantumService:
             time.sleep(3)
         except Exception as e:
             logger.warning("Не удалось кликнуть 'На карте': %s", e)
-            return False
+            return {}
 
         # Ожидаем открытия модального окна карты / трека
         try:
@@ -447,74 +449,118 @@ class AdvantumService:
                 )
             )
             print("[Advantum] Окно трека открыто.")
+            time.sleep(2)
 
-            # Корректировка времени: начало 00 часов, окончание 23 часа
-            time_inputs = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'MuiPickersTextField')]//input")
+            # Находим поля ввода времени: 'Начало трека' и 'Окончание трека'
+            time_inputs = self.driver.find_elements(
+                By.XPATH, "//div[contains(@class, 'map') or contains(@class, 'track') or contains(@class, 'panel')]//input[contains(@value, ':')]"
+            )
+            if not time_inputs:
+                time_inputs = self.driver.find_elements(By.XPATH, "//input[contains(@value, ':')]")
+
             if len(time_inputs) >= 2:
-                # Начало трека -> 00
+                # 1. Начало трека -> устанавливаем 00 часов
                 try:
-                    cal_icons = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'MuiPickersTextField')]//button")
-                    if cal_icons:
-                        self.driver.execute_script("arguments[0].click();", cal_icons[0])
-                        time.sleep(1)
-                        # Выбираем 00 часов
-                        hour_00 = self.driver.find_elements(By.XPATH, "//*[normalize-space(text())='00']")
-                        if hour_00:
-                            self.driver.execute_script("arguments[0].click();", hour_00[0])
-                            time.sleep(0.5)
-                        # Кнопка OK / закрыть попап
-                        ok_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='OK']")
-                        if ok_btn:
-                            self.driver.execute_script("arguments[0].click();", ok_btn[0])
+                    print("[Advantum] Установка начала трека на 00:xx...")
+                    # Кликаем иконку календаря первого поля
+                    parent_box = time_inputs[0].find_element(By.XPATH, "./..")
+                    cal_btns = parent_box.find_elements(By.XPATH, ".//button")
+                    if cal_btns:
+                        self.driver.execute_script("arguments[0].click();", cal_btns[0])
+                    else:
+                        time_inputs[0].click()
+                    time.sleep(1.2)
+
+                    # В открывшемся попапе выбираем 00
+                    h00 = self.driver.find_elements(By.XPATH, "//li[normalize-space(text())='00'] | //button[normalize-space(text())='00']")
+                    if h00:
+                        self.driver.execute_script("arguments[0].click();", h00[0])
+                        time.sleep(0.5)
+
+                    # Нажимаем OK
+                    ok_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='OK']")
+                    if ok_btn:
+                        self.driver.execute_script("arguments[0].click();", ok_btn[0])
+                    time.sleep(0.5)
                 except Exception as e:
                     logger.debug("Настройка начала трека: %s", e)
 
-                # Окончание трека -> 23
+                # 2. Окончание трека -> устанавливаем 23 часа
                 try:
-                    cal_icons = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'MuiPickersTextField')]//button")
-                    if len(cal_icons) >= 2:
-                        self.driver.execute_script("arguments[0].click();", cal_icons[1])
-                        time.sleep(1)
-                        hour_23 = self.driver.find_elements(By.XPATH, "//*[normalize-space(text())='23']")
-                        if hour_23:
-                            self.driver.execute_script("arguments[0].click();", hour_23[0])
-                            time.sleep(0.5)
-                        ok_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='OK']")
-                        if ok_btn:
-                            self.driver.execute_script("arguments[0].click();", ok_btn[0])
+                    print("[Advantum] Установка окончания трека на 23:xx...")
+                    parent_box = time_inputs[1].find_element(By.XPATH, "./..")
+                    cal_btns = parent_box.find_elements(By.XPATH, ".//button")
+                    if cal_btns:
+                        self.driver.execute_script("arguments[0].click();", cal_btns[0])
+                    else:
+                        time_inputs[1].click()
+                    time.sleep(1.2)
+
+                    h23 = self.driver.find_elements(By.XPATH, "//li[normalize-space(text())='23'] | //button[normalize-space(text())='23']")
+                    if h23:
+                        self.driver.execute_script("arguments[0].click();", h23[0])
+                        time.sleep(0.5)
+
+                    ok_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='OK']")
+                    if ok_btn:
+                        self.driver.execute_script("arguments[0].click();", ok_btn[0])
+                    time.sleep(0.5)
                 except Exception as e:
                     logger.debug("Настройка окончания трека: %s", e)
 
-            # Кнопка обновить трек (круглая стрелка)
+            # 3. Нажимаем круглую синюю кнопку обновления трека [R]
             try:
-                refresh_btn = self.driver.find_elements(
-                    By.XPATH, "//button[contains(@class, 'refresh') or .//*[name()='svg']]"
+                print("[Advantum] Нажатие кнопки обновления трека...")
+                refresh_btns = self.driver.find_elements(
+                    By.XPATH,
+                    "//div[contains(@class, 'map') or contains(@class, 'track')]//button[contains(@class, 'MuiButton-root') and .//*[name()='svg']]"
+                    " | //button[contains(@class, 'refresh')]"
                 )
-                for b in refresh_btn:
-                    if b.is_displayed():
-                        self.driver.execute_script("arguments[0].click();", b)
+                for rb in refresh_btns:
+                    if rb.is_displayed():
+                        self.driver.execute_script("arguments[0].click();", rb)
                         break
-                time.sleep(2)
+                time.sleep(3)
+            except Exception as e:
+                logger.debug("Кнопка обновления трека: %s", e)
+
+            # 4. В списке точек справа нажимаем на проблемную точку (например, БИОКОДЕ / МСК000132723)
+            if point_code:
+                try:
+                    print(f"[Advantum] Центрирование карты на точке [{point_code}]...")
+                    point_card = self.driver.find_elements(
+                        By.XPATH,
+                        f"//div[contains(., '{point_code}') and (contains(@class, 'point') or contains(@class, 'item') or @role='row' or contains(@class, 'card'))]"
+                    )
+                    if point_card:
+                        self.driver.execute_script("arguments[0].click();", point_card[-1])
+                        time.sleep(2)
+                except Exception as e:
+                    logger.debug("Клик по точке в списке карты: %s", e)
+
+            # 5. Считываем координаты центра карты (где установлена точка в Advantum)
+            adv_coords = None
+            try:
+                adv_coords = self.driver.execute_script("""
+                    var c = document.querySelector('.leaflet-container');
+                    if (c) {
+                        for (var k in c) {
+                            if (k.indexOf('leaflet') !== -1 && c[k] && c[k].getCenter) {
+                                var center = c[k].getCenter();
+                                return {lat: center.lat, lon: center.lng};
+                            }
+                        }
+                    }
+                    return null;
+                """)
             except Exception:
                 pass
 
-            # Если передан код точки (МСК...) — кликаем на нее в списке справа на карте
-            if point_code:
-                try:
-                    point_row = self.driver.find_element(
-                        By.XPATH, f"//div[contains(., '{point_code}') and (@role='row' or contains(@class, 'point'))]"
-                    )
-                    self.driver.execute_script("arguments[0].click();", point_row)
-                    time.sleep(1)
-                    print(f"[Advantum] Фокус на точке {point_code} в окне карты.")
-                except Exception:
-                    pass
-
-            return True
+            return adv_coords or {}
 
         except Exception as e:
             logger.warning("Ошибка при работе с окном трека: %s", e)
-            return False
+            return {}
 
     def open_yandex_maps_tab(self, address: str) -> None:
         """Открывает Яндекс Карты с адресом в новой вкладке браузера."""
