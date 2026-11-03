@@ -122,15 +122,74 @@ class YandexGeocoder:
     def geocode(self, address: str) -> GeocodeResult:
         """
         Геокодирует адрес.
-        Если задан YANDEX_MAPS_API_KEY — использует официальный HTTP API Яндекса.
-        Если ключ не задан — использует публичный геокодер OpenStreetMap Nominatim.
+        1. Если задан YANDEX_MAPS_API_KEY — использует официальный HTTP API Яндекса.
+        2. Иначе использует прямой поиск Яндекс Карт (без API-ключа).
+        3. Если не удалось — fallback на Nominatim.
         """
         clean_addr = clean_address_for_search(address)
 
         if self.api_key:
-            return self._geocode_yandex_api(clean_addr)
-        else:
-            return self._geocode_nominatim(clean_addr)
+            try:
+                return self._geocode_yandex_api(clean_addr)
+            except Exception as e:
+                logger.warning("Ошибка Yandex API (%s), переход на прямой поиск...", e)
+
+        # Прямой поиск через веб-сервис Яндекс Карт (надежно, без 403, точно для РФ)
+        try:
+            return self._geocode_yandex_web(clean_addr)
+        except Exception as e:
+            logger.warning("Ошибка прямого поиска Яндекс Карт: %s. Попытка через Nominatim...", e)
+
+        return self._geocode_nominatim(clean_addr)
+
+    def _geocode_yandex_web(self, address: str) -> GeocodeResult:
+        """
+        Прямой геокодинг через Яндекс Карты без API-ключа.
+        Использует выдачу yandex.ru/maps, извлекая эталонные координаты [lat, lon].
+        """
+        variants = normalize_address_variants(address)
+        last_error = None
+
+        for query_str in variants:
+            encoded_addr = urllib.parse.quote(query_str)
+            url = f"https://yandex.ru/maps/?text={encoded_addr}"
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                    "Accept-Language": "ru,en;q=0.9",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    html = resp.read().decode("utf-8")
+
+                # В HTML Яндекс Карт координаты лежат в параметре ll=lon%2Clat
+                matches = re.findall(
+                    r"ll=([0-9\.]+)%2C([0-9\.]+)|coordinates=([0-9\.]+)%2C([0-9\.]+)",
+                    html,
+                )
+                if matches:
+                    for m in matches:
+                        lon = float(m[0] or m[2])
+                        lat = float(m[1] or m[3])
+                        return GeocodeResult(
+                            lat=lat,
+                            lon=lon,
+                            found_address=query_str,
+                            precision="exact",
+                            source="yandex_web",
+                        )
+            except Exception as e:
+                last_error = e
+
+        raise ValueError(
+            f"Не удалось получить координаты из Яндекс Карт для '{address}'. Ошибка: {last_error}"
+        )
 
     def _geocode_yandex_api(self, address: str) -> GeocodeResult:
         """Запрос к официальному Yandex Geocoder API."""

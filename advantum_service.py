@@ -371,13 +371,21 @@ class AdvantumService:
             cells = r.find_elements(By.XPATH, ".//div[@role='gridcell' or contains(@class, 'cell')]")
             raw_cells = [c.text.strip() for c in cells if c.text.strip()]
 
-            # Название клиента (обычно перед МСК...)
+            # Название клиента (чистим от номеров строк и статусов)
             name = ""
-            name_match = re.search(r"([А-Яа-яA-Za-z0-9\-\s]+)\s*\(МСК\d+\)", text)
-            if name_match:
-                name = name_match.group(1).strip()
-            elif len(raw_cells) >= 3:
-                name = raw_cells[2]
+            for line in text.splitlines():
+                line = line.strip()
+                if "МСК" in line:
+                    m = re.search(r"^([^\(]+?)\s*\(МСК\d+\)", line)
+                    if m:
+                        name = m.group(1).strip()
+                        break
+            if not name:
+                name_match = re.search(r"([А-Яа-яA-Za-z0-9\- ]+?)\s*\(МСК\d+\)", text)
+                if name_match:
+                    name = name_match.group(1).strip()
+                elif len(raw_cells) >= 3:
+                    name = raw_cells[2]
 
             # Адрес точки
             address = ""
@@ -409,6 +417,114 @@ class AdvantumService:
         for p in failed:
             print(f"  • Точка №{p.index} [{p.code}]: {p.name} | {p.address}")
         return failed
+
+    def open_track_map(self, point_code: str = "") -> bool:
+        """
+        Нажимает кнопку 'На карте' для выбранного рейса,
+        устанавливает фильтр времени (00 до 23 часов) и центрирует на точке.
+        """
+        print("[Advantum] Открытие трека водителя ('На карте')...")
+        wait_overlays_gone(self.driver, timeout=5)
+
+        map_btn_xpath = (
+            "//button[@title='На карте' or @aria-label='На карте']"
+            " | //div[contains(@class, 'toolbar')]//button[1]"
+            " | //button[contains(@class, 'MuiButton') and .//*[contains(@title, 'На карте')]]"
+        )
+        try:
+            map_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, map_btn_xpath)))
+            self.driver.execute_script("arguments[0].click();", map_btn)
+            time.sleep(3)
+        except Exception as e:
+            logger.warning("Не удалось кликнуть 'На карте': %s", e)
+            return False
+
+        # Ожидаем открытия модального окна карты / трека
+        try:
+            self.wait.until(
+                EC.presence_of_element_located(
+                    (By.XPATH, "//div[contains(@class, 'leaflet') or contains(@class, 'map')] | //input[contains(@value, ':')]")
+                )
+            )
+            print("[Advantum] Окно трека открыто.")
+
+            # Корректировка времени: начало 00 часов, окончание 23 часа
+            time_inputs = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'MuiPickersTextField')]//input")
+            if len(time_inputs) >= 2:
+                # Начало трека -> 00
+                try:
+                    cal_icons = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'MuiPickersTextField')]//button")
+                    if cal_icons:
+                        self.driver.execute_script("arguments[0].click();", cal_icons[0])
+                        time.sleep(1)
+                        # Выбираем 00 часов
+                        hour_00 = self.driver.find_elements(By.XPATH, "//*[normalize-space(text())='00']")
+                        if hour_00:
+                            self.driver.execute_script("arguments[0].click();", hour_00[0])
+                            time.sleep(0.5)
+                        # Кнопка OK / закрыть попап
+                        ok_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='OK']")
+                        if ok_btn:
+                            self.driver.execute_script("arguments[0].click();", ok_btn[0])
+                except Exception as e:
+                    logger.debug("Настройка начала трека: %s", e)
+
+                # Окончание трека -> 23
+                try:
+                    cal_icons = self.driver.find_elements(By.XPATH, "//div[contains(@class, 'MuiPickersTextField')]//button")
+                    if len(cal_icons) >= 2:
+                        self.driver.execute_script("arguments[0].click();", cal_icons[1])
+                        time.sleep(1)
+                        hour_23 = self.driver.find_elements(By.XPATH, "//*[normalize-space(text())='23']")
+                        if hour_23:
+                            self.driver.execute_script("arguments[0].click();", hour_23[0])
+                            time.sleep(0.5)
+                        ok_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='OK']")
+                        if ok_btn:
+                            self.driver.execute_script("arguments[0].click();", ok_btn[0])
+                except Exception as e:
+                    logger.debug("Настройка окончания трека: %s", e)
+
+            # Кнопка обновить трек (круглая стрелка)
+            try:
+                refresh_btn = self.driver.find_elements(
+                    By.XPATH, "//button[contains(@class, 'refresh') or .//*[name()='svg']]"
+                )
+                for b in refresh_btn:
+                    if b.is_displayed():
+                        self.driver.execute_script("arguments[0].click();", b)
+                        break
+                time.sleep(2)
+            except Exception:
+                pass
+
+            # Если передан код точки (МСК...) — кликаем на нее в списке справа на карте
+            if point_code:
+                try:
+                    point_row = self.driver.find_element(
+                        By.XPATH, f"//div[contains(., '{point_code}') and (@role='row' or contains(@class, 'point'))]"
+                    )
+                    self.driver.execute_script("arguments[0].click();", point_row)
+                    time.sleep(1)
+                    print(f"[Advantum] Фокус на точке {point_code} в окне карты.")
+                except Exception:
+                    pass
+
+            return True
+
+        except Exception as e:
+            logger.warning("Ошибка при работе с окном трека: %s", e)
+            return False
+
+    def open_yandex_maps_tab(self, address: str) -> None:
+        """Открывает Яндекс Карты с адресом в новой вкладке браузера."""
+        print(f"[Яндекс Карты] Открытие адреса в новой вкладке: {address}...")
+        try:
+            js = "window.open('https://yandex.ru/maps/?text=' + encodeURIComponent(arguments[0]), '_blank');"
+            self.driver.execute_script(js, address)
+            time.sleep(1.5)
+        except Exception as e:
+            logger.warning("Не удалось открыть вкладку Яндекс Карт: %s", e)
 
     def recalculate_telematics(self) -> bool:
         """

@@ -137,18 +137,24 @@ def main():
             print(f" Адрес из Advantum: {p.address}")
             print("-" * 70)
 
-            # Геокодирование через Яндекс Карты / OSM
+            # 7.1. Открываем трек водителя в Advantum (00..23 часа) и центрируем на точке
+            advantum.open_track_map(point_code=p.code)
+
+            # 7.2. Открываем Яндекс Карты в соседней вкладке браузера для визуальной сверки
+            advantum.open_yandex_maps_tab(p.address)
+
+            # 7.3. Геокодирование через Яндекс Карты
             try:
                 geo_res = geocoder.geocode(p.address)
                 print(f" [Геокодер] Найдено:  {geo_res.found_address}")
-                print(f" [Геокодер] Точные координаты: Широта={geo_res.lat:.8f}, Долгота={geo_res.lon:.8f}")
+                print(f" [Геокодер] Точные координаты: Широта={geo_res.lat:.8f}, Долгота={geo_res.lon:.8f} (источник: {geo_res.source})")
             except Exception as e:
                 logger.error("Не удалось геокодировать адрес '%s': %s", p.address, e)
                 continue
 
-            # Если мы в режиме применения изменений (или эмуляции)
+            # 7.4. Если мы в режиме применения изменений (или эмуляции)
             if not args.dry_run:
-                # Обновляем координаты в 1С
+                # Переключаемся на окно 1С и обновляем координаты
                 success = onec.update_coordinates(
                     code=p.code,
                     address=p.address,
@@ -164,8 +170,19 @@ def main():
 
         # 8. Пересчет телематики в Advantum
         if points_updated_in_1c > 0 and not args.no_recalc and not args.dry_run:
-            print("\n[Advantum] Точки обновлены в 1С. Запуск пересчета телематики в Advantum...")
-            time.sleep(2)  # пауза перед пересчетом
+            print("\n[Advantum] Возврат в окно рейсов и запуск пересчета телематики...")
+            # Если открыто окно карты / вкладка Яндекс Карт — переключаемся на основную вкладку Advantum
+            try:
+                driver.switch_to.window(driver.window_handles[0])
+                time.sleep(1)
+                # Закрываем модальное окно трека (крестик или ESC), чтобы вернуться к строке рейса
+                close_btn = driver.find_elements(By.XPATH, "//div[contains(@class, 'map')]//button[contains(@class, 'close')] | //button[@aria-label='Close']")
+                if close_btn:
+                    driver.execute_script("arguments[0].click();", close_btn[0])
+                    time.sleep(1)
+            except Exception:
+                pass
+
             recalc_ok = advantum.recalculate_telematics()
             if recalc_ok:
                 print(" [Advantum] ✓ Пересчет телематики успешно запрошен!")
@@ -177,6 +194,9 @@ def main():
         print(f" Всего неотбитых точек: {len(failed_points)}")
         print(f" Обновлено в 1С:         {points_updated_in_1c}")
         print("=" * 70 + "\n")
+
+        if not args.headless:
+            input("[Процесс завершен] Нажмите Enter для закрытия браузера (или закройте вручную)...")
 
     except KeyboardInterrupt:
         print("\n[Прервано пользователем]")
