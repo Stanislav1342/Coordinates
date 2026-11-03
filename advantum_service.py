@@ -418,10 +418,10 @@ class AdvantumService:
             print(f"  • Точка №{p.index} [{p.code}]: {p.name} | {p.address}")
         return failed
 
-    def open_track_map(self, point_code: str = "") -> dict:
+    def open_track_map(self, point_code: str = "", point_name: str = "") -> dict:
         """
         Нажимает кнопку 'На карте' для выбранного рейса,
-        устанавливает фильтр времени (00:xx до 23:xx), обновляет трек
+        устанавливает фильтр времени (00:00 до 23:59), обновляет трек
         и центрирует карту на проблемной точке.
         Возвращает текущие координаты точки из Advantum, если удалось прочитать.
         """
@@ -445,116 +445,201 @@ class AdvantumService:
         try:
             self.wait.until(
                 EC.presence_of_element_located(
-                    (By.XPATH, "//div[contains(@class, 'leaflet') or contains(@class, 'map')] | //input[contains(@value, ':')]")
+                    (By.XPATH, "//div[contains(@class, 'leaflet') or contains(@class, 'map')]")
                 )
             )
             print("[Advantum] Окно трека открыто.")
             time.sleep(2)
 
-            # Находим поля ввода времени: 'Начало трека' и 'Окончание трека'
-            time_inputs = self.driver.find_elements(
-                By.XPATH, "//div[contains(@class, 'map') or contains(@class, 'track') or contains(@class, 'panel')]//input[contains(@value, ':')]"
-            )
-            if not time_inputs:
-                time_inputs = self.driver.find_elements(By.XPATH, "//input[contains(@value, ':')]")
-
-            if len(time_inputs) >= 2:
-                # 1. Начало трека -> устанавливаем 00 часов
-                try:
-                    print("[Advantum] Установка начала трека на 00:xx...")
-                    # Кликаем иконку календаря первого поля
-                    parent_box = time_inputs[0].find_element(By.XPATH, "./..")
-                    cal_btns = parent_box.find_elements(By.XPATH, ".//button")
-                    if cal_btns:
-                        self.driver.execute_script("arguments[0].click();", cal_btns[0])
-                    else:
-                        time_inputs[0].click()
-                    time.sleep(1.2)
-
-                    # В открывшемся попапе выбираем 00
-                    h00 = self.driver.find_elements(By.XPATH, "//li[normalize-space(text())='00'] | //button[normalize-space(text())='00']")
-                    if h00:
-                        self.driver.execute_script("arguments[0].click();", h00[0])
-                        time.sleep(0.5)
-
-                    # Нажимаем OK
-                    ok_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='OK']")
-                    if ok_btn:
-                        self.driver.execute_script("arguments[0].click();", ok_btn[0])
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.debug("Настройка начала трека: %s", e)
-
-                # 2. Окончание трека -> устанавливаем 23 часа
-                try:
-                    print("[Advantum] Установка окончания трека на 23:xx...")
-                    parent_box = time_inputs[1].find_element(By.XPATH, "./..")
-                    cal_btns = parent_box.find_elements(By.XPATH, ".//button")
-                    if cal_btns:
-                        self.driver.execute_script("arguments[0].click();", cal_btns[0])
-                    else:
-                        time_inputs[1].click()
-                    time.sleep(1.2)
-
-                    h23 = self.driver.find_elements(By.XPATH, "//li[normalize-space(text())='23'] | //button[normalize-space(text())='23']")
-                    if h23:
-                        self.driver.execute_script("arguments[0].click();", h23[0])
-                        time.sleep(0.5)
-
-                    ok_btn = self.driver.find_elements(By.XPATH, "//button[normalize-space(text())='OK']")
-                    if ok_btn:
-                        self.driver.execute_script("arguments[0].click();", ok_btn[0])
-                    time.sleep(0.5)
-                except Exception as e:
-                    logger.debug("Настройка окончания трека: %s", e)
-
-            # 3. Нажимаем круглую синюю кнопку обновления трека [R]
-            try:
-                print("[Advantum] Нажатие кнопки обновления трека...")
-                refresh_btns = self.driver.find_elements(
-                    By.XPATH,
-                    "//div[contains(@class, 'map') or contains(@class, 'track')]//button[contains(@class, 'MuiButton-root') and .//*[name()='svg']]"
-                    " | //button[contains(@class, 'refresh')]"
-                )
-                for rb in refresh_btns:
-                    if rb.is_displayed():
-                        self.driver.execute_script("arguments[0].click();", rb)
-                        break
-                time.sleep(3)
-            except Exception as e:
-                logger.debug("Кнопка обновления трека: %s", e)
-
-            # 4. В списке точек справа нажимаем на проблемную точку (например, БИОКОДЕ / МСК000132723)
-            if point_code:
-                try:
-                    print(f"[Advantum] Центрирование карты на точке [{point_code}]...")
-                    point_card = self.driver.find_elements(
-                        By.XPATH,
-                        f"//div[contains(., '{point_code}') and (contains(@class, 'point') or contains(@class, 'item') or @role='row' or contains(@class, 'card'))]"
-                    )
-                    if point_card:
-                        self.driver.execute_script("arguments[0].click();", point_card[-1])
-                        time.sleep(2)
-                except Exception as e:
-                    logger.debug("Клик по точке в списке карты: %s", e)
-
-            # 5. Считываем координаты центра карты (где установлена точка в Advantum)
-            adv_coords = None
-            try:
-                adv_coords = self.driver.execute_script("""
-                    var c = document.querySelector('.leaflet-container');
-                    if (c) {
-                        for (var k in c) {
-                            if (k.indexOf('leaflet') !== -1 && c[k] && c[k].getCenter) {
-                                var center = c[k].getCenter();
-                                return {lat: center.lat, lon: center.lng};
+            # 1. Установка фильтра времени: 00:00 - 23:59 и клик по кнопке обновления трека через JS
+            track_filter_js = """
+            return (function() {
+                var allInputs = Array.from(document.querySelectorAll('input'));
+                var timeInputs = allInputs.filter(function(i) {
+                    var v = i.value || '';
+                    return /\\d{2}\\.\\d{2}\\.\\d{4}\\s+\\d{2}:\\d{2}/.test(v);
+                });
+                
+                if (timeInputs.length < 2) {
+                    timeInputs = allInputs.filter(function(i) {
+                        return (i.value || '').indexOf(':') !== -1;
+                    });
+                }
+                
+                var res = {found: timeInputs.length, start_set: '', end_set: '', refreshed: false};
+                
+                function setVal(input, val) {
+                    input.focus();
+                    var desc = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value');
+                    if (desc && desc.set) {
+                        desc.set.call(input, val);
+                    } else {
+                        input.value = val;
+                    }
+                    input.dispatchEvent(new Event('input', { bubbles: true }));
+                    input.dispatchEvent(new Event('change', { bubbles: true }));
+                    input.blur();
+                }
+                
+                if (timeInputs.length >= 2) {
+                    var startVal = timeInputs[0].value;
+                    var endVal = timeInputs[1].value;
+                    
+                    var newStart = startVal.replace(/\\d{2}:\\d{2}$/, '00:00');
+                    var newEnd = endVal.replace(/\\d{2}:\\d{2}$/, '23:59');
+                    
+                    setVal(timeInputs[0], newStart);
+                    setVal(timeInputs[1], newEnd);
+                    
+                    res.start_set = newStart;
+                    res.end_set = newEnd;
+                }
+                
+                // Ищем синюю круглую кнопку обновления трека с круговой стрелкой
+                var buttons = Array.from(document.querySelectorAll('button'));
+                var refreshBtn = buttons.find(function(b) {
+                    var aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                    var title = (b.getAttribute('title') || '').toLowerCase();
+                    return aria.indexOf('обнов') !== -1 || aria.indexOf('refresh') !== -1 ||
+                           title.indexOf('обнов') !== -1 || title.indexOf('refresh') !== -1;
+                });
+                
+                if (!refreshBtn && timeInputs.length >= 2) {
+                    var parent = timeInputs[1].closest('.MuiFormControl-root') || timeInputs[1].parentElement;
+                    if (parent && parent.parentElement) {
+                        var siblings = Array.from(parent.parentElement.querySelectorAll('button'));
+                        for (var i = 0; i < siblings.length; i++) {
+                            if (!siblings[i].closest('.MuiFormControl-root')) {
+                                refreshBtn = siblings[i];
+                                break;
                             }
                         }
                     }
+                }
+                
+                if (refreshBtn) {
+                    refreshBtn.click();
+                    res.refreshed = true;
+                }
+                
+                return res;
+            })();
+            """
+            filter_res = self.driver.execute_script(track_filter_js)
+            if filter_res and filter_res.get("start_set") and filter_res.get("end_set"):
+                print(f"[Advantum] Установлен фильтр времени трека: {filter_res['start_set']} — {filter_res['end_set']}")
+            else:
+                print(f"[Advantum] Фильтр времени трека: {filter_res}")
+
+            if filter_res and filter_res.get("refreshed"):
+                print("[Advantum] Нажата кнопка обновления трека.")
+            time.sleep(3)
+
+            # 2. В списке точек справа нажимаем на проблемную точку (например, БИОКОДЕ / МСК000132723)
+            print(f"[Advantum] Центрирование карты на точке [{point_code or point_name}]...")
+            center_js = """
+            return (function(code, name) {
+                var all = Array.from(document.querySelectorAll('*'));
+                var target = all.find(function(el) {
+                    return el.children.length === 0 && (
+                        (code && el.textContent.indexOf(code) !== -1) ||
+                        (name && el.textContent.indexOf(name) !== -1)
+                    );
+                });
+                
+                if (target) {
+                    var card = target.closest('[role="button"], [role="row"], .point, .card, li, div[class*="item"]') || target.parentElement;
+                    if (card) {
+                        var pinBtn = card.querySelector('button, svg, [class*="target"], [class*="gps"]');
+                        if (pinBtn) {
+                            pinBtn.click();
+                            return {clicked: 'pin_button'};
+                        }
+                        card.click();
+                        return {clicked: 'card'};
+                    }
+                }
+                return {clicked: false};
+            })(arguments[0], arguments[1]);
+            """
+            self.driver.execute_script(center_js, point_code, point_name)
+            time.sleep(2)
+
+            # 3. Считываем координаты точки из Advantum (React Fiber / Leaflet)
+            coords_js = """
+            return (function(code, name) {
+                var all = Array.from(document.querySelectorAll('*'));
+                var target = all.find(function(el) {
+                    return (code && el.textContent.indexOf(code) !== -1) ||
+                           (name && el.textContent.indexOf(name) !== -1);
+                });
+                
+                if (target) {
+                    var fiberKey = Object.keys(target).find(function(k) {
+                        return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance');
+                    });
+                    if (fiberKey) {
+                        var curr = target[fiberKey];
+                        for (var depth = 0; depth < 25 && curr; depth++) {
+                            var props = curr.memoizedProps;
+                            if (props) {
+                                var candidates = [props, props.point, props.item, props.data, props.row, props.pointData];
+                                for (var i = 0; i < candidates.length; i++) {
+                                    var c = candidates[i];
+                                    if (c && typeof c === 'object') {
+                                        var lat = c.lat || c.latitude || (c.coords && c.coords[0]) || (c.coordinate && c.coordinate.lat);
+                                        var lon = c.lon || c.lng || c.longitude || (c.coords && c.coords[1]) || (c.coordinate && c.coordinate.lon);
+                                        if (typeof lat === 'number' && typeof lon === 'number' && lat > 0 && lon > 0) {
+                                            return {lat: lat, lon: lon, method: 'react_fiber'};
+                                        }
+                                    }
+                                }
+                            }
+                            curr = curr.return;
+                        }
+                    }
+                }
+                
+                function findLeafletMap() {
+                    var c = document.querySelector('.leaflet-container');
+                    if (!c) return null;
+                    if (c._leaflet_map) return c._leaflet_map;
+                    for (var k in c) {
+                        try {
+                            if (c[k] && typeof c[k] === 'object' && c[k]._layers) return c[k];
+                        } catch(e) {}
+                    }
+                    for (var k in window) {
+                        try {
+                            if (window[k] && typeof window[k] === 'object' && window[k]._layers && window[k].getCenter) return window[k];
+                        } catch(e) {}
+                    }
                     return null;
-                """)
-            except Exception:
-                pass
+                }
+                
+                var map = findLeafletMap();
+                if (map) {
+                    for (var id in map._layers) {
+                        var l = map._layers[id];
+                        if (l && l._latlng) {
+                            var html = l._icon ? (l._icon.innerHTML || l._icon.className) : '';
+                            if (html.indexOf(code) !== -1 || html.indexOf('>1<') !== -1 || html.indexOf('point-1') !== -1) {
+                                return {lat: l._latlng.lat, lon: l._latlng.lng, method: 'leaflet_marker'};
+                            }
+                        }
+                    }
+                    var center = map.getCenter();
+                    if (center && typeof center.lat === 'number') {
+                        return {lat: center.lat, lon: center.lng, method: 'map_center'};
+                    }
+                }
+                
+                return null;
+            })(arguments[0], arguments[1]);
+            """
+            adv_coords = self.driver.execute_script(coords_js, point_code, point_name)
+            if adv_coords and adv_coords.get("lat") and adv_coords.get("lon"):
+                print(f"[Advantum] Получены координаты точки из системы ({adv_coords.get('method')}): {adv_coords['lat']:.8f}, {adv_coords['lon']:.8f}")
 
             return adv_coords or {}
 

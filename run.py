@@ -138,7 +138,7 @@ def main():
             print("=" * 70)
 
             # 7.1. Открываем трек водителя в Advantum (00..23 часа), центрируем на точке и считываем координаты
-            adv_pos = advantum.open_track_map(point_code=p.code)
+            adv_pos = advantum.open_track_map(point_code=p.code, point_name=p.name)
             adv_lat = adv_pos.get("lat")
             adv_lon = adv_pos.get("lon")
 

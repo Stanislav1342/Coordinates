@@ -102,6 +102,8 @@ class WindowsOneCService(OneCServiceInterface):
             from pywinauto.keyboard import send_keys
             self.app_module = Application
             self.send_keys = send_keys
+            self.app = None
+            self.main_win = None
         except ImportError:
             raise ImportError(
                 "Библиотека pywinauto не установлена! Установите ее: pip install pywinauto"
@@ -116,11 +118,52 @@ class WindowsOneCService(OneCServiceInterface):
         if not windows:
             raise RuntimeError("Главное окно 1С не найдено! Убедитесь, что 1С запущена.")
         
-        app = self.app_module(backend="uia").connect(handle=windows[0].handle)
-        main_win = app.window(handle=windows[0].handle)
-        main_win.set_focus()
+        self.app = self.app_module(backend="uia").connect(handle=windows[0].handle)
+        self.main_win = self.app.window(handle=windows[0].handle)
+        self.main_win.set_focus()
         time.sleep(0.8)
-        return main_win
+        return self.main_win
+
+    def _find_elements_by_text(self, text_substr: str, control_type: Optional[str] = None):
+        """
+        Безопасный поиск элементов по подстроке текста без использования title_re.
+        Исключает ошибки IUIA.build_condition() и работает во всех версиях pywinauto.
+        """
+        results = []
+        windows_to_check = []
+        if self.main_win is not None:
+            windows_to_check.append(self.main_win)
+        if self.app is not None:
+            try:
+                windows_to_check.extend(self.app.windows())
+            except Exception:
+                pass
+
+        seen_handles = set()
+        for w in windows_to_check:
+            try:
+                h = w.handle
+                if h in seen_handles:
+                    continue
+                seen_handles.add(h)
+            except Exception:
+                pass
+
+            try:
+                kwargs = {}
+                if control_type:
+                    kwargs["control_type"] = control_type
+                desc = w.descendants(**kwargs)
+                for el in desc:
+                    try:
+                        txt = el.window_text() or ""
+                        if text_substr.lower() in txt.lower():
+                            results.append(el)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return results
 
     def update_coordinates(
         self,
@@ -132,23 +175,26 @@ class WindowsOneCService(OneCServiceInterface):
         client_name: str = "",
     ) -> bool:
         print(f"\n[1С:Windows] Активация 1С для обновления точки '{client_name or code}'...")
-        main_win = self._find_main_window()
+        self._find_main_window()
 
         # -------------------------------------------------------------
-        # ШАГ 1: Открытие раздела 'Адреса доставки' строго через Звездочку ⭐ (Избранное)
+        # ШАГ 1: Переход в раздел 'Адреса доставки' строго через Избранное ⭐
         # -------------------------------------------------------------
         print("[1С:Windows] Открытие Избранного через звездочку ⭐...")
         opened_fav = False
 
-        # Пробуем кликнуть кнопку со звездочкой в шапке
+        # Пробуем кликнуть кнопку со звездочкой в шапке (по тексту 'Избранное')
         try:
-            star_btns = main_win.descendants(control_type="Button", title_re=".*Избранное.*|.*★.*|.*☆.*")
+            star_btns = self._find_elements_by_text("Избранное", control_type="Button")
             for sb in star_btns:
-                if sb.is_displayed():
-                    sb.click_input()
-                    opened_fav = True
-                    time.sleep(1.0)
-                    break
+                try:
+                    if sb.is_displayed():
+                        sb.click_input()
+                        opened_fav = True
+                        time.sleep(1.0)
+                        break
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug("Поиск кнопки звездочки: %s", e)
 
@@ -159,29 +205,35 @@ class WindowsOneCService(OneCServiceInterface):
             time.sleep(1.2)
 
         # В открывшейся панели 'Избранное' нажимаем 'Адреса доставки'
-        print("[1С:Windows] Клик по разделу 'Адреса доставки' в Избранном...")
+        print("[1С:Windows] Выбор раздела 'Адреса доставки' в Избранном...")
         clicked_addr = False
         try:
-            fav_items = main_win.descendants(title="Адреса доставки")
+            fav_items = self._find_elements_by_text("Адреса доставки")
             for item in fav_items:
-                if item.is_displayed():
-                    item.click_input()
-                    clicked_addr = True
-                    time.sleep(2.0)
-                    break
+                try:
+                    if item.is_displayed():
+                        item.click_input()
+                        clicked_addr = True
+                        time.sleep(2.0)
+                        break
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug("Клик по 'Адреса доставки' в списке: %s", e)
 
-        # Если клик по элементу не прошел — первое значение в списке это 'Адреса доставки', нажимаем Down + Enter
+        # Если клик по элементу не сработал через UIA:
+        # В открытом меню Избранного 'Адреса доставки' стоит ПЕРВЫМ пунктом и уже в фокусе!
+        # Нажимаем строго ENTER (без стрелок вниз!), чтобы открыть его:
         if not clicked_addr:
-            self.send_keys("{DOWN}{ENTER}")
+            print("[1С:Windows] Пункт не нажат кликом, нажимаем Enter для выбора первого пункта Избранного...")
+            self.send_keys("{ENTER}")
             time.sleep(2.0)
 
         # -------------------------------------------------------------
         # ШАГ 2: Поиск строки в разделе 'Адреса доставки'
         # -------------------------------------------------------------
-        # Предпочитаем поиск по адресу (как делает пользователь), с подстраховкой кодом
-        search_query = address if address else code
+        # Предпочитаем уникальный код 1С (МСК...), если есть, либо адрес
+        search_query = code if (code and code.startswith("МСК")) else address
         print(f"[1С:Windows] Поиск в разделе 'Адреса доставки': '{search_query}'...")
 
         # Нажимаем Ctrl+F для вызова строки поиска
@@ -206,21 +258,23 @@ class WindowsOneCService(OneCServiceInterface):
         # ШАГ 4: Переход на вкладку 'Адресная информация'
         # -------------------------------------------------------------
         print("[1С:Windows] Переход во вкладку 'Адресная информация'...")
+        tab_clicked = False
         try:
-            card_tabs = main_win.descendants(control_type="TabItem", title="Адресная информация")
-            if card_tabs and card_tabs[0].is_displayed():
-                card_tabs[0].click_input()
-                time.sleep(1.2)
-            else:
-                # Поиск любого элемента с текстом 'Адресная информация'
-                tab_elems = main_win.descendants(title="Адресная информация")
-                for te in tab_elems:
+            tab_elems = self._find_elements_by_text("Адресная информация")
+            for te in tab_elems:
+                try:
                     if te.is_displayed():
                         te.click_input()
+                        tab_clicked = True
                         time.sleep(1.2)
                         break
+                except Exception:
+                    pass
         except Exception as e:
             logger.warning("Переход во вкладку Адресная информация: %s", e)
+
+        if not tab_clicked:
+            logger.info("Вкладка 'Адресная информация' возможно уже активна.")
 
         # -------------------------------------------------------------
         # ШАГ 5: Ввод новых координат через буфер обмена (Ctrl+V)
@@ -231,29 +285,39 @@ class WindowsOneCService(OneCServiceInterface):
 
         # Поле 'Широта:'
         try:
-            lat_labels = main_win.descendants(control_type="Text", title_re=".*Широта.*")
-            if lat_labels:
-                lat_labels[0].click_input()
-                time.sleep(0.3)
-                self.send_keys("{TAB}")  # фокус на поле ввода
-                time.sleep(0.2)
-                set_clipboard(lat_str)
-                self.send_keys("^a^v")
-                time.sleep(0.3)
+            lat_labels = self._find_elements_by_text("Широта")
+            for lbl in lat_labels:
+                try:
+                    if lbl.is_displayed():
+                        lbl.click_input()
+                        time.sleep(0.3)
+                        self.send_keys("{TAB}")  # фокус на поле ввода
+                        time.sleep(0.2)
+                        set_clipboard(lat_str)
+                        self.send_keys("^a^v")
+                        time.sleep(0.3)
+                        break
+                except Exception:
+                    continue
         except Exception as e:
             logger.warning("Заполнение Широты: %s", e)
 
         # Поле 'Долгота:'
         try:
-            lon_labels = main_win.descendants(control_type="Text", title_re=".*Долгота.*")
-            if lon_labels:
-                lon_labels[0].click_input()
-                time.sleep(0.3)
-                self.send_keys("{TAB}")
-                time.sleep(0.2)
-                set_clipboard(lon_str)
-                self.send_keys("^a^v")
-                time.sleep(0.3)
+            lon_labels = self._find_elements_by_text("Долгота")
+            for lbl in lon_labels:
+                try:
+                    if lbl.is_displayed():
+                        lbl.click_input()
+                        time.sleep(0.3)
+                        self.send_keys("{TAB}")
+                        time.sleep(0.2)
+                        set_clipboard(lon_str)
+                        self.send_keys("^a^v")
+                        time.sleep(0.3)
+                        break
+                except Exception:
+                    continue
         except Exception as e:
             logger.warning("Заполнение Долготы: %s", e)
 
@@ -261,38 +325,60 @@ class WindowsOneCService(OneCServiceInterface):
         if radius is not None:
             print(f"[1С:Windows] Запись радиуса зоны: {radius} м...")
             try:
-                rad_labels = main_win.descendants(control_type="Text", title_re=".*Радиус зоны.*")
-                if rad_labels:
-                    rad_labels[0].click_input()
-                    time.sleep(0.3)
-                    self.send_keys("{TAB}")
-                    time.sleep(0.2)
-                    set_clipboard(str(radius))
-                    self.send_keys("^a^v")
-                    time.sleep(0.3)
+                rad_labels = self._find_elements_by_text("Радиус")
+                for lbl in rad_labels:
+                    try:
+                        if lbl.is_displayed():
+                            lbl.click_input()
+                            time.sleep(0.3)
+                            self.send_keys("{TAB}")
+                            time.sleep(0.2)
+                            set_clipboard(str(radius))
+                            self.send_keys("^a^v")
+                            time.sleep(0.3)
+                            break
+                    except Exception:
+                        continue
             except Exception as e:
                 logger.warning("Заполнение Радиуса зоны: %s", e)
 
         # Чекбокс 'Координаты проверены'
         try:
-            chks = main_win.descendants(control_type="CheckBox", title="Координаты проверены")
-            if chks and not chks[0].get_toggle_state():
-                chks[0].click_input()
-                time.sleep(0.3)
-        except Exception:
-            pass
+            chks = self._find_elements_by_text("Координаты проверены", control_type="CheckBox")
+            for chk in chks:
+                try:
+                    if chk.is_displayed():
+                        try:
+                            if not chk.get_toggle_state():
+                                chk.click_input()
+                        except Exception:
+                            chk.click_input()
+                        time.sleep(0.3)
+                        break
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("Чекбокс: %s", e)
 
         # -------------------------------------------------------------
         # ШАГ 6: Сохранение карточки 'Записать и закрыть' (Ctrl+Enter)
         # -------------------------------------------------------------
         print("[1С:Windows] Нажатие 'Записать и закрыть' (Ctrl+Enter)...")
+        saved = False
         try:
-            save_btns = main_win.descendants(control_type="Button", title="Записать и закрыть")
-            if save_btns and save_btns[0].is_displayed():
-                save_btns[0].click_input()
-            else:
-                self.send_keys("^{ENTER}")
+            save_btns = self._find_elements_by_text("Записать и закрыть", control_type="Button")
+            for btn in save_btns:
+                try:
+                    if btn.is_displayed():
+                        btn.click_input()
+                        saved = True
+                        break
+                except Exception:
+                    pass
         except Exception:
+            pass
+
+        if not saved:
             self.send_keys("^{ENTER}")
 
         time.sleep(2.5)
