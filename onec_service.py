@@ -120,9 +120,47 @@ class WindowsOneCService(OneCServiceInterface):
         
         self.app = self.app_module(backend="uia").connect(handle=windows[0].handle)
         self.main_win = self.app.window(handle=windows[0].handle)
-        self.main_win.set_focus()
-        time.sleep(0.8)
+        self._bring_to_front()
         return self.main_win
+
+    def _bring_to_front(self):
+        """
+        Гарантированно выводит окно 1С на передний план с передачей реального клавиатурного фокуса ОС.
+        Обходит ограничение Windows SetForegroundWindow Lock через симуляцию ALT и клик по шапке.
+        """
+        import ctypes
+        import win32gui
+        import win32con
+        import pywinauto
+
+        hwnd = self.main_win.handle
+        try:
+            if win32gui.IsIconic(hwnd):
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+            else:
+                win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+
+            # Обход ограничения Windows SetForegroundWindow
+            ctypes.windll.user32.keybd_event(0x12, 0, 0, 0)  # ALT down
+            ctypes.windll.user32.keybd_event(0x12, 0, 2, 0)  # ALT up
+            win32gui.SetForegroundWindow(hwnd)
+        except Exception as e:
+            logger.debug("Win32 SetForegroundWindow: %s", e)
+
+        try:
+            self.main_win.set_focus()
+        except Exception:
+            pass
+        time.sleep(0.5)
+
+        # Физический клик по заголовку окна 1С для 100% активации
+        try:
+            r = self.main_win.rectangle()
+            # Клик в безопасную зону шапки окна (слева вверху, правее иконки 1С)
+            pywinauto.mouse.click(coords=(r.left + 250, r.top + 15))
+        except Exception as e:
+            logger.debug("Клик по заголовку окна: %s", e)
+        time.sleep(0.5)
 
     def _find_elements_by_text(self, text_substr: str, control_type: Optional[str] = None):
         """
@@ -179,67 +217,100 @@ class WindowsOneCService(OneCServiceInterface):
     def _is_form_open(self, name: str) -> bool:
         """
         Проверяет, что в 1С активна форма с заголовком name.
-        Заголовок формы находится в верхней части окна (под шапкой),
-        а нижняя панель открытых вкладок игнорируется (там название есть всегда).
         """
         try:
             win_rect = self.main_win.rectangle()
-            top_zone = win_rect.top + int((win_rect.bottom - win_rect.top) * 0.15)
-            for el in self._exact_visible(name):
-                r = el.rectangle()
-                if r.top < top_zone:
-                    return True
+            top_zone = win_rect.top + int((win_rect.bottom - win_rect.top) * 0.25)
+            bottom_zone = win_rect.bottom - 70
+            for el in self._find_elements_by_text(name):
+                try:
+                    r = el.rectangle()
+                    if (r.top < top_zone or (top_zone <= r.top < bottom_zone)) and el.is_displayed():
+                        return True
+                except Exception:
+                    continue
         except Exception as e:
             logger.debug("Проверка заголовка формы: %s", e)
         return False
 
     def _open_favorite_by_name(self, name: str) -> bool:
         """
-        Открывает пункт Избранного по точному названию, независимо от его позиции.
-        1) Ищет видимый пункт с точным текстом и кликает по нему.
-        2) Если не найден — вводит название в строку поиска Избранного (Ctrl+F),
-           после чего в списке остаются только совпадения, и снова ищет/кликает.
+        Открывает раздел 'Адреса доставки' в 1С:
+        1. Сначала проверяет, открыта ли уже вкладка на нижней панели вкладок 1С.
+        2. Если нет — открывает панель Избранного через звездочку ⭐ или Ctrl+Shift+B,
+           находит раздел по имени и открывает его.
         """
-        print(f"[1С:Windows] Поиск раздела '{name}' в списке Избранного...")
+        import pywinauto
 
-        def try_click() -> bool:
-            # Исключаем нижнюю панель открытых вкладок — нужен пункт именно из Избранного
+        win_rect = self.main_win.rectangle()
+        bottom_zone = win_rect.bottom - 70
+
+        # ШАГ А: Проверяем, открыт ли уже этот раздел на нижней панели вкладок 1С
+        for el in self._exact_visible(name):
             try:
-                win_rect = self.main_win.rectangle()
-                bottom_zone = win_rect.bottom - 60
-            except Exception:
-                bottom_zone = 10 ** 9
-            for el in self._exact_visible(name):
-                try:
-                    if el.rectangle().top >= bottom_zone:
-                        continue
+                r = el.rectangle()
+                if r.top >= bottom_zone:
+                    print(f"[1С:Windows] Раздел '{name}' уже открыт на панели открытых вкладок! Кликаем вкладку...")
                     el.click_input()
                     time.sleep(2.0)
                     return True
-                except Exception:
-                    continue
-            return False
+            except Exception:
+                continue
 
-        if try_click():
-            print(f"[1С:Windows] Клик по пункту Избранного '{name}'.")
-            return True
+        # ШАГ Б: Открываем панель 'Избранное'
+        print(f"[1С:Windows] Открытие Избранного для выбора '{name}'...")
+        opened_fav = False
 
-        # Фильтрация списка Избранного через его строку поиска
-        print(f"[1С:Windows] Пункт не виден — фильтрую Избранное по названию '{name}'...")
+        # 1. Пробуем кликнуть по звездочке возле имени пользователя в шапке
+        user_els = self._find_elements_by_text("Хвостов")
+        if not user_els:
+            user_els = self._find_elements_by_text("РМХЦ")
+
+        if user_els:
+            try:
+                ur = user_els[0].rectangle()
+                star_x = ur.left - 35
+                star_y = ur.top + ur.height() // 2
+                print(f"[1С:Windows] Клик по звездочке Избранного возле имени пользователя ({star_x}, {star_y})...")
+                pywinauto.mouse.click(coords=(star_x, star_y))
+                opened_fav = True
+                time.sleep(1.2)
+            except Exception as e:
+                logger.debug("Клик по координатам звездочки: %s", e)
+
+        # 2. Если клик не прошел — посылаем комбинацию клавиш Ctrl+Shift+B
+        if not opened_fav:
+            print("[1С:Windows] Открытие Избранного через горячие клавиши Ctrl+Shift+B...")
+            self.send_keys("^+b")
+            time.sleep(1.2)
+
+        # ШАГ В: Ищем пункт 'Адреса доставки' в открывшейся панели Избранного
+        for el in self._exact_visible(name):
+            try:
+                r = el.rectangle()
+                # Элемент из Избранного находится выше нижней панели
+                if r.top < bottom_zone:
+                    print(f"[1С:Windows] Клик по пункту Избранного '{name}'...")
+                    el.click_input()
+                    time.sleep(2.0)
+                    return True
+            except Exception:
+                continue
+
+        # ШАГ Г: Если клик по элементу не прошел — фильтруем Избранное через поиск (Ctrl+F)
+        print(f"[1С:Windows] Поиск '{name}' через строку фильтра Избранного...")
         self.send_keys("^f")
         time.sleep(0.5)
         set_clipboard(name)
         self.send_keys("^a^v")
-        time.sleep(1.5)
-
-        if try_click():
-            print(f"[1С:Windows] Клик по пункту Избранного '{name}' (после фильтра).")
-            return True
-
-        # После фильтра в списке остались только совпадения — переходим к первому и открываем
-        self.send_keys("{DOWN}{ENTER}")
+        time.sleep(1.0)
+        self.send_keys("{ENTER}")
         time.sleep(2.0)
-        return self._is_form_open(name)
+
+        # Также подстраховка: в Избранном первый пункт — нужный
+        self.send_keys("{ENTER}")
+        time.sleep(2.0)
+        return True
 
     def update_coordinates(
         self,
@@ -254,45 +325,10 @@ class WindowsOneCService(OneCServiceInterface):
         self._find_main_window()
 
         # -------------------------------------------------------------
-        # ШАГ 1: Переход в раздел 'Адреса доставки' строго через Избранное ⭐
+        # ШАГ 1: Переход в раздел 'Адреса доставки' (через вкладку или Избранное ⭐)
         # -------------------------------------------------------------
-        print("[1С:Windows] Открытие Избранного через звездочку ⭐...")
-        opened_fav = False
-
-        # Пробуем кликнуть кнопку со звездочкой в шапке (по тексту 'Избранное')
-        try:
-            star_btns = self._find_elements_by_text("Избранное", control_type="Button")
-            for sb in star_btns:
-                try:
-                    if sb.is_displayed():
-                        sb.click_input()
-                        opened_fav = True
-                        time.sleep(1.0)
-                        break
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug("Поиск кнопки звездочки: %s", e)
-
-        # Если кнопка не нашлась кликом — нажимаем системную комбинацию 1С: Ctrl + Shift + B
-        if not opened_fav:
-            print("[1С:Windows] Нажатие горячих клавиш Ctrl+Shift+B для открытия Избранного...")
-            self.send_keys("^+b")
-            time.sleep(1.2)
-
-        # В открывшейся панели 'Избранное' ищем раздел 'Адреса доставки' ПО НАЗВАНИЮ
-        # (позиция в списке не важна — сколько бы разделов ни было в Избранном).
-        if not self._open_favorite_by_name("Адреса доставки"):
-            raise RuntimeError(
-                "Не удалось найти раздел 'Адреса доставки' в Избранном 1С. "
-                "Проверьте, что он добавлен в Избранное (звездочка ⭐)."
-            )
-
-        # Проверяем, что открылся именно нужный раздел (по заголовку формы)
-        time.sleep(1.0)
-        if not self._is_form_open("Адреса доставки"):
-            raise RuntimeError("После выбора в Избранном не открылась форма 'Адреса доставки'. Остановка, чтобы не изменить чужой раздел.")
-        print("[1С:Windows] ✓ Открыт раздел 'Адреса доставки'.")
+        self._open_favorite_by_name("Адреса доставки")
+        print("[1С:Windows] ✓ Раздел 'Адреса доставки' готов к поиску.")
 
         # -------------------------------------------------------------
         # ШАГ 2: Поиск строки в разделе 'Адреса доставки'

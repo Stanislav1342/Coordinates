@@ -428,6 +428,8 @@ class AdvantumService:
         print("[Advantum] Открытие трека водителя ('На карте')...")
         wait_overlays_gone(self.driver, timeout=5)
 
+        orig_handles = list(self.driver.window_handles)
+
         map_btn_xpath = (
             "//button[@title='На карте' or @aria-label='На карте']"
             " | //div[contains(@class, 'toolbar')]//button[1]"
@@ -436,20 +438,35 @@ class AdvantumService:
         try:
             map_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, map_btn_xpath)))
             self.driver.execute_script("arguments[0].click();", map_btn)
-            time.sleep(3)
+            time.sleep(2)
         except Exception as e:
             logger.warning("Не удалось кликнуть 'На карте': %s", e)
             return {}
 
-        # Ожидаем открытия модального окна карты / трека
+        # Проверяем, открылось ли отдельное окно/вкладка для трека
+        switched_to_popup = False
+        for _ in range(10):
+            cur_handles = list(self.driver.window_handles)
+            if len(cur_handles) > len(orig_handles):
+                new_handle = cur_handles[-1]
+                self.driver.switch_to.window(new_handle)
+                switched_to_popup = True
+                print(f"[Advantum] Переключились на открывшееся окно трека (handle: {new_handle}).")
+                break
+            time.sleep(0.5)
+
+        if not switched_to_popup:
+            print("[Advantum] Окно трека открылось в текущей вкладке (или popup без нового handle).")
+
+        # Ожидаем появления карты / трека (быстрый таймаут 15 сек вместо 60)
         try:
-            self.wait.until(
+            WebDriverWait(self.driver, 15).until(
                 EC.presence_of_element_located(
-                    (By.XPATH, "//div[contains(@class, 'leaflet') or contains(@class, 'map')]")
+                    (By.XPATH, "//div[contains(@class, 'leaflet') or contains(@class, 'map')] | //input[contains(@value, ':')]")
                 )
             )
             print("[Advantum] Окно трека открыто.")
-            time.sleep(2)
+            time.sleep(1.5)
 
             # 1. Установка фильтра времени: 00:00 - 23:59 и клик по кнопке обновления трека через JS
             track_filter_js = """

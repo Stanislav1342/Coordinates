@@ -175,12 +175,7 @@ def main():
             print(f" • Вердикт системы:                     {evaluation['reason']}")
             print("-" * 70)
 
-            # 7.5. Интерактивная пауза для визуального контроля
-            if not args.headless:
-                print("\n[Визуальный контроль] В браузере открыты: 1) вкладка с треком Advantum, 2) вкладка с Яндекс Картами.")
-                input(">>> Проверьте визуально локацию на экране и нажмите Enter для перехода в 1С и обновления...")
-
-            # 7.6. Если мы в режиме применения изменений
+            # 7.5. Переход к обновлению в 1С (автоматический режим без ручных пауз)
             if not args.dry_run:
                 # Переключаемся на окно 1С и обновляем координаты
                 try:
@@ -204,7 +199,13 @@ def main():
         if points_updated_in_1c > 0 and not args.no_recalc and not args.dry_run:
             print("\n[Advantum] Возврат в окно рейсов и запуск пересчета телематики...")
             try:
-                # 1. Переключаемся на основную вкладку с Advantum
+                # 1. Закрываем вспомогательные окна/вкладки (Яндекс Карты, Map), оставляем главное
+                while len(driver.window_handles) > 1:
+                    driver.switch_to.window(driver.window_handles[-1])
+                    try:
+                        driver.close()
+                    except Exception:
+                        pass
                 driver.switch_to.window(driver.window_handles[0])
                 time.sleep(1)
 
