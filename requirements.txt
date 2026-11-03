@@ -1,0 +1,5 @@
+selenium>=4.25.0
+webdriver-manager>=4.0.2
+python-dotenv>=1.0.1
+requests>=2.31.0
+pywinauto>=0.6.8; sys_platform == 'win32'
