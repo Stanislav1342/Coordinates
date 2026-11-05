@@ -926,6 +926,16 @@ class DirectCDPDriver:
                 )
             except Exception:
                 pass
+            # После закрытия вкладки сразу переключаемся на оставшуюся живую вкладку
+            try:
+                targets = self._fetch_json_list()
+                page_targets = [
+                    t for t in targets if t.get("type") == "page" and t.get("webSocketDebuggerUrl")
+                ]
+                if page_targets:
+                    self._attach_to_target(page_targets[0]["id"])
+            except Exception:
+                pass
 
     def quit(self) -> None:
         if self._ws:

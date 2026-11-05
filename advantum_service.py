@@ -582,41 +582,63 @@ class AdvantumService:
             self.driver.execute_script(center_js, point_code, point_name)
             time.sleep(2)
 
-            # 3. Считываем координаты точки из Advantum (React Fiber / Leaflet)
+            # 3. Считываем координаты точки из Advantum (React Fiber / Leaflet / Map Center)
             coords_js = """
             return (function(code, name) {
-                var all = Array.from(document.querySelectorAll('*'));
-                var target = all.find(function(el) {
-                    return (code && el.textContent.indexOf(code) !== -1) ||
-                           (name && el.textContent.indexOf(name) !== -1);
+                // Вспомогательная функция глубокого поиска координат в объекте props
+                function extractCoords(obj, depth, visited) {
+                    if (!obj || typeof obj !== 'object' || depth > 4) return null;
+                    if (visited.has(obj)) return null;
+                    visited.add(obj);
+
+                    var lat = obj.lat || obj.latitude || (obj.coords && obj.coords[0]) || (obj.coordinate && (obj.coordinate.lat || obj.coordinate.latitude));
+                    var lon = obj.lon || obj.lng || obj.longitude || (obj.coords && obj.coords[1]) || (obj.coordinate && (obj.coordinate.lon || obj.coordinate.longitude));
+                    
+                    if (typeof lat === 'number' && typeof lon === 'number' && lat > 30 && lat < 80 && lon > 10 && lon < 180) {
+                        return {lat: lat, lon: lon};
+                    }
+
+                    var checkKeys = ['point', 'item', 'row', 'data', 'location', 'geo', 'coordinates', 'coordinate', 'target'];
+                    for (var i = 0; i < checkKeys.length; i++) {
+                        var k = checkKeys[i];
+                        if (obj[k] && typeof obj[k] === 'object') {
+                            var res = extractCoords(obj[k], depth + 1, visited);
+                            if (res) return res;
+                        }
+                    }
+                    return null;
+                }
+
+                // А. Проверяем листовые элементы (leaf nodes) с кодом или названием точки
+                var leafEls = Array.from(document.querySelectorAll('*')).filter(function(el) {
+                    return el.children.length === 0 && (
+                        (code && el.textContent.indexOf(code) !== -1) ||
+                        (name && el.textContent.indexOf(name) !== -1)
+                    );
                 });
-                
-                if (target) {
-                    var fiberKey = Object.keys(target).find(function(k) {
+
+                for (var j = 0; j < leafEls.length; j++) {
+                    var el = leafEls[j];
+                    var fiberKey = Object.keys(el).find(function(k) {
                         return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance');
                     });
                     if (fiberKey) {
-                        var curr = target[fiberKey];
-                        for (var depth = 0; depth < 25 && curr; depth++) {
-                            var props = curr.memoizedProps;
-                            if (props) {
-                                var candidates = [props, props.point, props.item, props.data, props.row, props.pointData];
-                                for (var i = 0; i < candidates.length; i++) {
-                                    var c = candidates[i];
-                                    if (c && typeof c === 'object') {
-                                        var lat = c.lat || c.latitude || (c.coords && c.coords[0]) || (c.coordinate && c.coordinate.lat);
-                                        var lon = c.lon || c.lng || c.longitude || (c.coords && c.coords[1]) || (c.coordinate && c.coordinate.lon);
-                                        if (typeof lat === 'number' && typeof lon === 'number' && lat > 0 && lon > 0) {
-                                            return {lat: lat, lon: lon, method: 'react_fiber'};
-                                        }
-                                    }
+                        var curr = el[fiberKey];
+                        var visited = new Set();
+                        for (var d = 0; d < 25 && curr; d++) {
+                            if (curr.memoizedProps) {
+                                var found = extractCoords(curr.memoizedProps, 0, visited);
+                                if (found) {
+                                    found.method = 'react_fiber';
+                                    return found;
                                 }
                             }
                             curr = curr.return;
                         }
                     }
                 }
-                
+
+                // Б. Ищем Leaflet Map
                 function findLeafletMap() {
                     var c = document.querySelector('.leaflet-container');
                     if (!c) return null;
@@ -631,9 +653,20 @@ class AdvantumService:
                             if (window[k] && typeof window[k] === 'object' && window[k]._layers && window[k].getCenter) return window[k];
                         } catch(e) {}
                     }
+                    // Поиск через React Fiber у контейнера Leaflet
+                    var fKey = Object.keys(c).find(function(k) { return k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'); });
+                    if (fKey) {
+                        var cur = c[fKey];
+                        for (var d = 0; d < 20 && cur; d++) {
+                            if (cur.memoizedProps && (cur.memoizedProps.map || cur.memoizedProps.leafletMap)) {
+                                return cur.memoizedProps.map || cur.memoizedProps.leafletMap;
+                            }
+                            cur = cur.return;
+                        }
+                    }
                     return null;
                 }
-                
+
                 var map = findLeafletMap();
                 if (map) {
                     for (var id in map._layers) {
@@ -650,7 +683,7 @@ class AdvantumService:
                         return {lat: center.lat, lon: center.lng, method: 'map_center'};
                     }
                 }
-                
+
                 return null;
             })(arguments[0], arguments[1]);
             """

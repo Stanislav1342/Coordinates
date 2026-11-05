@@ -236,9 +236,10 @@ class WindowsOneCService(OneCServiceInterface):
     def _open_favorite_by_name(self, name: str) -> bool:
         """
         Открывает раздел 'Адреса доставки' в 1С:
-        1. Сначала проверяет, открыта ли уже вкладка на нижней панели вкладок 1С.
-        2. Если нет — открывает панель Избранного через звездочку ⭐ или Ctrl+Shift+B,
-           находит раздел по имени и открывает его.
+        1. Проверяет, открыт ли уже этот раздел на нижней панели вкладок 1С.
+        2. Если нет — открывает панель Избранного через Ctrl+Shift+B или клик по звездочке ⭐.
+        3. Находит раздел в списке Избранного и кликает / нажимает Enter.
+        4. СТРОГО проверяет, что раздел открылся, прежде чем продолжать!
         """
         import pywinauto
 
@@ -246,70 +247,121 @@ class WindowsOneCService(OneCServiceInterface):
         bottom_zone = win_rect.bottom - 70
 
         # ШАГ А: Проверяем, открыт ли уже этот раздел на нижней панели вкладок 1С
-        for el in self._exact_visible(name):
-            try:
-                r = el.rectangle()
-                if r.top >= bottom_zone:
-                    print(f"[1С:Windows] Раздел '{name}' уже открыт на панели открытых вкладок! Кликаем вкладку...")
-                    el.click_input()
-                    time.sleep(2.0)
-                    return True
-            except Exception:
-                continue
+        print(f"[1С:Windows] Проверка открытых вкладок на нижней панели 1С...")
+        for w in self.app.windows():
+            for el in w.descendants():
+                try:
+                    if (el.window_text() or "").strip() == name and el.is_displayed():
+                        r = el.rectangle()
+                        if r.top >= bottom_zone:
+                            print(f"[1С:Windows] Раздел '{name}' уже открыт на панели открытых вкладок! Кликаем вкладку...")
+                            el.click_input()
+                            time.sleep(2.0)
+                            return True
+                except Exception:
+                    continue
 
-        # ШАГ Б: Открываем панель 'Избранное'
-        print(f"[1С:Windows] Открытие Избранного для выбора '{name}'...")
-        opened_fav = False
+        # ШАГ Б: Открываем панель 'Избранное' через Ctrl+Shift+B
+        print(f"[1С:Windows] Открытие Избранного через Ctrl+Shift+B...")
+        self.send_keys("^+b")
+        time.sleep(1.2)
 
-        # 1. Пробуем кликнуть по звездочке возле имени пользователя в шапке
-        user_els = self._find_elements_by_text("Хвостов")
-        if not user_els:
-            user_els = self._find_elements_by_text("РМХЦ")
+        # Проверяем, открылось ли Избранное (ищем элемент с текстом 'Избранное')
+        fav_opened = False
+        for w in self.app.windows():
+            for el in w.descendants():
+                try:
+                    txt = (el.window_text() or "").strip()
+                    if txt in ("Избранное", name):
+                        fav_opened = True
+                        break
+                except Exception:
+                    pass
+            if fav_opened:
+                break
 
-        if user_els:
-            try:
+        # Если не открылось комбинацией клавиш — кликаем по точным координатам звездочки ⭐
+        if not fav_opened:
+            print("[1С:Windows] Комбинация клавиш не открыла панель, кликаем по звездочке ⭐ в шапке...")
+            # В шапке окна 1С (при 1920x1080) звездочка расположена на x=1635, y=16 (левее имени пользователя)
+            user_els = self._find_elements_by_text("Хвостов") or self._find_elements_by_text("РМХЦ")
+            if user_els:
                 ur = user_els[0].rectangle()
-                star_x = ur.left - 35
-                star_y = ur.top + ur.height() // 2
-                print(f"[1С:Windows] Клик по звездочке Избранного возле имени пользователя ({star_x}, {star_y})...")
+                star_x = ur.left - 30
+                star_y = 16
+            else:
+                star_x = 1635
+                star_y = 16
+
+            try:
                 pywinauto.mouse.click(coords=(star_x, star_y))
-                opened_fav = True
                 time.sleep(1.2)
             except Exception as e:
                 logger.debug("Клик по координатам звездочки: %s", e)
 
-        # 2. Если клик не прошел — посылаем комбинацию клавиш Ctrl+Shift+B
-        if not opened_fav:
-            print("[1С:Windows] Открытие Избранного через горячие клавиши Ctrl+Shift+B...")
+        # ШАГ В: Ищем и кликаем пункт 'Адреса доставки' в открывшейся панели Избранного
+        clicked_item = False
+        for w in self.app.windows():
+            for el in w.descendants():
+                try:
+                    if (el.window_text() or "").strip() == name and el.is_displayed():
+                        r = el.rectangle()
+                        # Элемент из меню Избранного находится в верхней части окна
+                        if r.top < bottom_zone:
+                            print(f"[1С:Windows] Клик по пункту Избранного '{name}'...")
+                            el.click_input()
+                            clicked_item = True
+                            time.sleep(2.5)
+                            break
+                except Exception:
+                    continue
+            if clicked_item:
+                break
+
+        # Если UIA-клик не нашел элемент — в Избранном первый пункт 'Адреса доставки', нажимаем Enter
+        if not clicked_item:
+            print(f"[1С:Windows] Нажатие Enter для выбора первого пункта Избранного...")
+            self.send_keys("{ENTER}")
+            time.sleep(2.5)
+
+        # ШАГ Г: СТРОГАЯ ПРОВЕРКА — действительно ли открылся раздел 'Адреса доставки'?
+        is_open = False
+        for w in self.app.windows():
+            for el in w.descendants():
+                try:
+                    if (el.window_text() or "").strip() == name and el.is_displayed():
+                        is_open = True
+                        break
+                except Exception:
+                    pass
+            if is_open:
+                break
+
+        if not is_open:
+            # Вторая попытка: открыть Избранное снова и нажать Enter
+            print("[1С:Windows] Повторная попытка переключения через Избранное...")
             self.send_keys("^+b")
-            time.sleep(1.2)
+            time.sleep(0.8)
+            self.send_keys("{ENTER}")
+            time.sleep(2.5)
+            for w in self.app.windows():
+                for el in w.descendants():
+                    try:
+                        if (el.window_text() or "").strip() == name and el.is_displayed():
+                            is_open = True
+                            break
+                    except Exception:
+                        pass
+                if is_open:
+                    break
 
-        # ШАГ В: Ищем пункт 'Адреса доставки' в открывшейся панели Избранного
-        for el in self._exact_visible(name):
-            try:
-                r = el.rectangle()
-                # Элемент из Избранного находится выше нижней панели
-                if r.top < bottom_zone:
-                    print(f"[1С:Windows] Клик по пункту Избранного '{name}'...")
-                    el.click_input()
-                    time.sleep(2.0)
-                    return True
-            except Exception:
-                continue
+        if not is_open:
+            raise RuntimeError(
+                f"Раздел '{name}' не открылся в 1С! Окно 1С осталось в другом разделе. "
+                "Операция остановлена для предотвращения ошибок."
+            )
 
-        # ШАГ Г: Если клик по элементу не прошел — фильтруем Избранное через поиск (Ctrl+F)
-        print(f"[1С:Windows] Поиск '{name}' через строку фильтра Избранного...")
-        self.send_keys("^f")
-        time.sleep(0.5)
-        set_clipboard(name)
-        self.send_keys("^a^v")
-        time.sleep(1.0)
-        self.send_keys("{ENTER}")
-        time.sleep(2.0)
-
-        # Также подстраховка: в Избранном первый пункт — нужный
-        self.send_keys("{ENTER}")
-        time.sleep(2.0)
+        print(f"[1С:Windows] ✓ Раздел '{name}' подтвержден и готов к поиску.")
         return True
 
     def update_coordinates(
@@ -325,10 +377,9 @@ class WindowsOneCService(OneCServiceInterface):
         self._find_main_window()
 
         # -------------------------------------------------------------
-        # ШАГ 1: Переход в раздел 'Адреса доставки' (через вкладку или Избранное ⭐)
+        # ШАГ 1: Переход в раздел 'Адреса доставки' с гарантированной проверкой
         # -------------------------------------------------------------
         self._open_favorite_by_name("Адреса доставки")
-        print("[1С:Windows] ✓ Раздел 'Адреса доставки' готов к поиску.")
 
         # -------------------------------------------------------------
         # ШАГ 2: Поиск строки в разделе 'Адреса доставки'
@@ -361,16 +412,18 @@ class WindowsOneCService(OneCServiceInterface):
         print("[1С:Windows] Переход во вкладку 'Адресная информация'...")
         tab_clicked = False
         try:
-            tab_elems = self._find_elements_by_text("Адресная информация")
-            for te in tab_elems:
-                try:
-                    if te.is_displayed():
-                        te.click_input()
-                        tab_clicked = True
-                        time.sleep(1.2)
-                        break
-                except Exception:
-                    pass
+            for w in self.app.windows():
+                for te in w.descendants():
+                    try:
+                        if (te.window_text() or "").strip() == "Адресная информация" and te.is_displayed():
+                            te.click_input()
+                            tab_clicked = True
+                            time.sleep(1.5)
+                            break
+                    except Exception:
+                        pass
+                if tab_clicked:
+                    break
         except Exception as e:
             logger.warning("Переход во вкладку Адресная информация: %s", e)
 
@@ -378,86 +431,99 @@ class WindowsOneCService(OneCServiceInterface):
             logger.info("Вкладка 'Адресная информация' возможно уже активна.")
 
         # -------------------------------------------------------------
-        # ШАГ 5: Ввод новых координат через буфер обмена (Ctrl+V)
+        # ШАГ 5: Ввод новых координат через буфер обмена (Ctrl+V) с валидацией
         # -------------------------------------------------------------
         lat_str = f"{lat:.8f}".replace(".", ",")
         lon_str = f"{lon:.8f}".replace(".", ",")
         print(f"[1С:Windows] Запись геоданных: Широта={lat_str}, Долгота={lon_str}...")
 
         # Поле 'Широта:'
+        lat_filled = False
         try:
-            lat_labels = self._find_elements_by_text("Широта")
-            for lbl in lat_labels:
-                try:
-                    if lbl.is_displayed():
-                        lbl.click_input()
-                        time.sleep(0.3)
-                        self.send_keys("{TAB}")  # фокус на поле ввода
-                        time.sleep(0.2)
-                        set_clipboard(lat_str)
-                        self.send_keys("^a^v")
-                        time.sleep(0.3)
-                        break
-                except Exception:
-                    continue
+            for w in self.app.windows():
+                for lbl in w.descendants():
+                    try:
+                        if "широта" in (lbl.window_text() or "").lower() and lbl.is_displayed():
+                            lbl.click_input()
+                            time.sleep(0.3)
+                            self.send_keys("{TAB}")  # фокус на поле ввода
+                            time.sleep(0.2)
+                            set_clipboard(lat_str)
+                            self.send_keys("^a^v")
+                            time.sleep(0.3)
+                            lat_filled = True
+                            break
+                    except Exception:
+                        continue
+                if lat_filled:
+                    break
         except Exception as e:
             logger.warning("Заполнение Широты: %s", e)
 
         # Поле 'Долгота:'
+        lon_filled = False
         try:
-            lon_labels = self._find_elements_by_text("Долгота")
-            for lbl in lon_labels:
-                try:
-                    if lbl.is_displayed():
-                        lbl.click_input()
-                        time.sleep(0.3)
-                        self.send_keys("{TAB}")
-                        time.sleep(0.2)
-                        set_clipboard(lon_str)
-                        self.send_keys("^a^v")
-                        time.sleep(0.3)
-                        break
-                except Exception:
-                    continue
+            for w in self.app.windows():
+                for lbl in w.descendants():
+                    try:
+                        if "долгота" in (lbl.window_text() or "").lower() and lbl.is_displayed():
+                            lbl.click_input()
+                            time.sleep(0.3)
+                            self.send_keys("{TAB}")
+                            time.sleep(0.2)
+                            set_clipboard(lon_str)
+                            self.send_keys("^a^v")
+                            time.sleep(0.3)
+                            lon_filled = True
+                            break
+                    except Exception:
+                        continue
+                if lon_filled:
+                    break
         except Exception as e:
             logger.warning("Заполнение Долготы: %s", e)
+
+        if not lat_filled or not lon_filled:
+            raise RuntimeError(
+                f"Не удалось заполнить координаты в карточке 1С! (Широта: {lat_filled}, Долгота: {lon_filled})."
+            )
 
         # Поле 'Радиус зоны:' (если передан радиус)
         if radius is not None:
             print(f"[1С:Windows] Запись радиуса зоны: {radius} м...")
             try:
-                rad_labels = self._find_elements_by_text("Радиус")
-                for lbl in rad_labels:
-                    try:
-                        if lbl.is_displayed():
-                            lbl.click_input()
-                            time.sleep(0.3)
-                            self.send_keys("{TAB}")
-                            time.sleep(0.2)
-                            set_clipboard(str(radius))
-                            self.send_keys("^a^v")
-                            time.sleep(0.3)
-                            break
-                    except Exception:
-                        continue
+                for w in self.app.windows():
+                    for lbl in w.descendants():
+                        try:
+                            if "радиус" in (lbl.window_text() or "").lower() and lbl.is_displayed():
+                                lbl.click_input()
+                                time.sleep(0.3)
+                                self.send_keys("{TAB}")
+                                time.sleep(0.2)
+                                set_clipboard(str(radius))
+                                self.send_keys("^a^v")
+                                time.sleep(0.3)
+                                break
+                        except Exception:
+                            continue
             except Exception as e:
                 logger.warning("Заполнение Радиуса зоны: %s", e)
 
         # Чекбокс 'Координаты проверены'
         try:
-            chks = self._find_elements_by_text("Координаты проверены", control_type="CheckBox")
-            for chk in chks:
-                try:
-                    if chk.is_displayed():
-                        try:
-                            if not chk.get_toggle_state():
+            for w in self.app.windows():
+                for chk in w.descendants(control_type="CheckBox"):
+                    try:
+                        if "координаты проверены" in (chk.window_text() or "").lower() and chk.is_displayed():
+                            try:
+                                if not chk.get_toggle_state():
+                                    chk.click_input()
+                            except Exception:
                                 chk.click_input()
-                        except Exception:
-                            chk.click_input()
-                        time.sleep(0.3)
-                        break
-                except Exception:
-                    pass
+                            time.sleep(0.3)
+                            break
+                    except Exception:
+                        pass
         except Exception as e:
             logger.debug("Чекбокс: %s", e)
 
@@ -467,15 +533,17 @@ class WindowsOneCService(OneCServiceInterface):
         print("[1С:Windows] Нажатие 'Записать и закрыть' (Ctrl+Enter)...")
         saved = False
         try:
-            save_btns = self._find_elements_by_text("Записать и закрыть", control_type="Button")
-            for btn in save_btns:
-                try:
-                    if btn.is_displayed():
-                        btn.click_input()
-                        saved = True
-                        break
-                except Exception:
-                    pass
+            for w in self.app.windows():
+                for btn in w.descendants(control_type="Button"):
+                    try:
+                        if (btn.window_text() or "").strip() == "Записать и закрыть" and btn.is_displayed():
+                            btn.click_input()
+                            saved = True
+                            break
+                    except Exception:
+                        pass
+                if saved:
+                    break
         except Exception:
             pass
 

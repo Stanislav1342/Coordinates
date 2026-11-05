@@ -122,6 +122,7 @@ def main():
 
         # 5. Поиск и выбор рейса
         advantum.find_and_select_trip(args.trip)
+        main_handle = driver.current_window_handle
 
         # 6. Получение неотбитых точек ('Не пройдена')
         failed_points = advantum.get_failed_points()
@@ -199,35 +200,18 @@ def main():
         if points_updated_in_1c > 0 and not args.no_recalc and not args.dry_run:
             print("\n[Advantum] Возврат в окно рейсов и запуск пересчета телематики...")
             try:
-                # 1. Закрываем вспомогательные окна/вкладки (Яндекс Карты, Map), оставляем главное
-                while len(driver.window_handles) > 1:
-                    driver.switch_to.window(driver.window_handles[-1])
-                    try:
-                        driver.close()
-                    except Exception:
-                        pass
-                driver.switch_to.window(driver.window_handles[0])
-                time.sleep(1)
+                # Переключаемся обратно на основную вкладку с таблицей рейсов (без закрытия вкладок)
+                driver.switch_to.window(main_handle)
+                time.sleep(1.5)
 
-                # 2. Если открыта страница трека /map — возвращаемся к таблице рейсов
+                # Если открыта страница трека /map — возвращаемся к таблице рейсов
                 if "control/shipments" not in driver.current_url:
-                    print("[Advantum] Возврат из карты трека в таблицу рейсов...")
+                    print("[Advantum] Возврат к таблице рейсов...")
                     driver.get("https://atms.advantum.ru/#/control/shipments")
                     time.sleep(3)
                     wait_overlays_gone(driver, timeout=10)
                     # Выбираем рейс снова, чтобы открылась панель инструментов
                     advantum.find_and_select_trip(args.trip)
-                else:
-                    # Закрываем модальное окно трека, если оно открыто поверх таблицы
-                    close_btns = driver.find_elements(
-                        By.XPATH,
-                        "//div[contains(@class, 'map')]//button[contains(@class, 'close')] | //button[@aria-label='Close']",
-                    )
-                    for cb in close_btns:
-                        if cb.is_displayed():
-                            driver.execute_script("arguments[0].click();", cb)
-                            time.sleep(1)
-                            break
             except Exception as e:
                 logger.debug("Возврат к таблице рейсов: %s", e)
 
