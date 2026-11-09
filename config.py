@@ -36,6 +36,11 @@ class Config:
     page_load_pause: float = 3.0
     click_retry_count: int = 3
 
+    # Настройки 1С:Предприятие (e1cib)
+    onec_window_regex: str = ".*(1С:Предприятие|ЕИС МСК|Корпоративная информационная система).*"
+    url_adresa_dostavki: str = "e1cib/list/Справочник.АдресаДоставки"
+    title_adresa_dostavki: str = "Адреса доставки"
+
     # Селекторы overlay/loader (MUI-специфичные)
     overlay_selectors: list = field(default_factory=lambda: [
         ".MuiBackdrop-root",

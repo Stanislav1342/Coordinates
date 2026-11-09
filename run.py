@@ -108,7 +108,7 @@ def main():
 
     # 2. Инициализация сервисов
     geocoder = YandexGeocoder()
-    onec = get_onec_service()
+    onec = get_onec_service(config)
 
     driver = None
     try:
