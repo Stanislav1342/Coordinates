@@ -40,6 +40,8 @@ class Config:
     onec_window_regex: str = ".*(1С:Предприятие|ЕИС МСК|Корпоративная информационная система).*"
     url_adresa_dostavki: str = "e1cib/list/Справочник.АдресаДоставки"
     title_adresa_dostavki: str = "Адреса доставки"
+    onec_org_filter_field: str = "Организация"
+    onec_org_filter_value: str = 'ООО "ФК ПУЛЬС"'
 
     # Селекторы overlay/loader (MUI-специфичные)
     overlay_selectors: list = field(default_factory=lambda: [
