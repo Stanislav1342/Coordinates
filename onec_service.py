@@ -97,6 +97,8 @@ class MockOneCService(OneCServiceInterface):
 
     def __init__(self, cfg: Optional[Config] = None):
         self.cfg = cfg or load_config()
+        self._section_opened = False
+        self._org_filter_applied = False
 
     def update_coordinates(
         self,
@@ -116,12 +118,22 @@ class MockOneCService(OneCServiceInterface):
         print("=" * 70)
         print(f" 1. Поиск главного окна 1С: '{self.cfg.onec_window_regex}' -> [Найдено]")
         print(" 2. Максимизация и активация окна 1С (ShowWindow SW_MAXIMIZE)")
-        print(" 3. Переход в раздел «Адреса доставки» (Shift + F11):")
-        print(f"    URL: «{self.cfg.url_adresa_dostavki}»")
-        print(" 4. Установка фильтра по организации (Еще -> Расширенный поиск):")
-        print(f"    • Где искать:     {self.cfg.onec_org_filter_field}")
-        print(f"    • Что искать:     {self.cfg.onec_org_filter_value}")
-        print("    • Кнопка:         [Найти] -> Ожидание загрузки фильтра...")
+        if not self._section_opened:
+            print(f" 3. Переход в раздел «Адреса доставки» (Shift + F11):")
+            print(f"    URL: «{self.cfg.url_adresa_dostavki}»")
+            self._section_opened = True
+        else:
+            print(f" 3. Раздел «Адреса доставки» уже открыт и активен.")
+
+        if not self._org_filter_applied:
+            print(" 4. Установка фильтра по организации (Еще -> Расширенный поиск):")
+            print(f"    • Где искать:     {self.cfg.onec_org_filter_field}")
+            print(f"    • Что искать:     {self.cfg.onec_org_filter_value}")
+            print("    • Кнопка:         [Найти] -> Ожидание загрузки фильтра...")
+            self._org_filter_applied = True
+        else:
+            print(f" 4. Фильтр «{self.cfg.onec_org_filter_field}: {self.cfg.onec_org_filter_value}» уже установлен ранее — пропускаем.")
+
         print(f" 5. Поиск номера точки (Поиск Ctrl+F -> Ctrl+V -> Enter): '{code or address}'")
         print("    • Ожидание загрузки найденной строки...")
         print(f" 6. Двойной клик по найденной строке -> открытие карточки: '{client_name or code}'")
@@ -174,6 +186,8 @@ class WindowsOneCService(OneCServiceInterface):
 
         self.app = None
         self.main_win = None
+        self._section_opened = False
+        self._org_filter_applied = False
 
     # ---------------------------------------------------------------------
     # Низкоуровневые методы работы с клавиатурой (не зависят от раскладки!)
@@ -504,84 +518,87 @@ class WindowsOneCService(OneCServiceInterface):
 
     def _activate_tab_or_open_link(self, url: str, section_title: str) -> None:
         """
-        Гарантированно открывает раздел «Адреса доставки» в 1С БЕЗ закрытия других разделов:
-          1. Закрывает окно «Калькулятор» (или «Переход по ссылке»), если оно осталось открытым.
-          2. Если вкладка «Адреса доставки» уже открыта на нижней панели — кликает по ней.
-          3. Если не открыта — открывает через Избранное ⭐ (клик по ⭐ на 1625, 15 -> клик «Адреса доставки» на 1420, 120).
-          4. Если через Избранное не открылась — нажимает кнопку прямой ссылки 🔗 на 1833, 50, вставляет URL и жмет Перейти.
-          5. Контролирует, что раздел реально открылся, и только после этого продолжает работу.
+        Переходит в раздел 1С по прямой навигационной ссылке (Shift+F11 / e1cib),
+        в точности как в проверенном на продакшене проекте «ЭТРН»:
+          1. Закрывает окно «Калькулятор», если оно осталось открытым.
+          2. Проверяет, не открыт ли раздел уже на нижней панели вкладок 1С.
+             Если открыт — мгновенно активирует его кликом по вкладке.
+          3. Если еще не открыт — открывает по ссылке e1cib через Shift + F11:
+             - Копирует URL в буфер обмена.
+             - Нажимает Shift + F11 (или кликает значок 🔗 на панели, если клавиатурный шорткат перехвачен).
+             - В диалоге «Переход по ссылке» нажимает кнопку «Вставить из буфера».
+             - Нажимает кнопку «Перейти».
+             - Дожидается загрузки раздела (3 сек + _wait_1c_ready).
         """
-        print(f"\n[1С:Windows] Переход в раздел «{section_title}»...")
+        print(f"\n[1С:Windows] Активация раздела «{section_title}»...")
 
-        # 1. Закрываем возможно оставшиеся модальные окна (Калькулятор, Переход по ссылке)
+        # Закрываем посторонние диалоги (например, оставшийся калькулятор)
         self._close_dialog_if_open("Калькулятор")
-        self._close_dialog_if_open("Переход по ссылке")
 
-        # 2. Если вкладка уже есть на нижней панели открытых вкладок — просто переключаемся
+        # 1. Проверяем, не открыт ли раздел уже на нижней панели вкладок 1С
         if self._activate_tab_by_name(section_title):
+            print(f"[1С:Windows] ✓ Раздел «{section_title}» уже был открыт — активирован кликом по вкладке.")
             time.sleep(1.0)
-            print(f"[1С:Windows] ✓ Раздел «{section_title}» активирован из открытых вкладок.")
+            self._section_opened = True
             return
 
-        # 3. Открываем через Избранное ⭐ (пользовательский сценарий)
-        print(f"[1С:Windows] Открытие раздела «{section_title}» через Избранное ⭐...")
-        star_x, star_y = self._scale_xy(1625, 15)
-        self.pywinauto.mouse.click(coords=(star_x, star_y))
-        time.sleep(0.7)
+        # 2. Если вкладка еще не открыта — переходим по прямой ссылке Shift + F11
+        print(f"[1С:Windows] Открытие раздела «{section_title}» по ссылке (Shift+F11)...")
+        print(f"             URL: {url}")
 
-        # Ищем пункт «Адреса доставки» в открывшемся списке Избранного
-        opened_via_fav = False
-        try:
-            for w in self.Desktop(backend="uia").windows():
-                for el in w.descendants():
-                    txt = (el.element_info.name or el.window_text() or "").strip()
-                    if txt == "Адреса доставки":
-                        el.click_input()
-                        opened_via_fav = True
-                        break
-                if opened_via_fav:
-                    break
-        except Exception:
-            pass
+        set_clipboard(url)
+        time.sleep(0.1)
 
-        if not opened_via_fav:
-            # Клик по первой строке меню Избранного на (1420, 120)
-            item_x, item_y = self._scale_xy(1420, 120)
-            self.pywinauto.mouse.click(coords=(item_x, item_y))
-
-        time.sleep(2.0)
-        self._wait_1c_ready(min_wait=1.5, max_wait=6.0)
-
-        # Проверяем, открылся ли раздел
-        if self._activate_tab_by_name(section_title) or self._is_section_active(section_title):
-            print(f"[1С:Windows] ✓ Раздел «{section_title}» успешно открыт через Избранное.")
-            return
-
-        # 4. Fallback: Переход по прямой ссылке через кнопку 🔗 (1833, 50)
-        print(f"[1С:Windows] Открытие через кнопку прямой ссылки 🔗 (1833, 50)...")
-        link_x, link_y = self._scale_xy(1833, 50)
-        self.pywinauto.mouse.click(coords=(link_x, link_y))
-        time.sleep(0.8)
-
-        goto_dlg = self._find_dialog("Переход по ссылке", timeout=2.0)
-        if goto_dlg:
-            set_clipboard(url)
-            time.sleep(0.1)
-            self._select_all_and_paste(url)
-            time.sleep(0.2)
-            self._hotkey_enter()
-            self._wait_1c_ready(min_wait=2.0, max_wait=8.0)
-
-        # 5. Финальная проверка, что открыт именно нужный раздел
+        self._hotkey_shift_f11()
         time.sleep(1.0)
-        if self._activate_tab_by_name(section_title) or self._is_section_active(section_title):
-            print(f"[1С:Windows] ✓ Раздел «{section_title}» успешно открыт.")
-            return
 
-        raise RuntimeError(
-            f"Не удалось открыть раздел «{section_title}» в 1С!\n"
-            f"Пожалуйста, откройте вкладку «{section_title}» в 1С вручную перед запуском скрипта."
-        )
+        link_dlg = self._find_dialog("переход по ссылке", timeout=3.0)
+
+        # Fallback: если диалог не открылся с клавиатуры, нажимаем кнопку 🔗 на панели (1833, 50)
+        if not link_dlg:
+            link_x, link_y = self._scale_xy(1833, 50)
+            print(f"[1С:Windows] Нажатие кнопки прямой ссылки 🔗 на панели ({link_x}, {link_y})...")
+            self.pywinauto.mouse.click(coords=(link_x, link_y))
+            time.sleep(0.8)
+            link_dlg = self._find_dialog("переход по ссылке", timeout=3.0)
+
+        pasted = False
+        if link_dlg:
+            try:
+                for btn in link_dlg.descendants(control_type="Button"):
+                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                    if "вставить из буфера" in txt:
+                        btn.click_input()
+                        pasted = True
+                        time.sleep(0.3)
+                        break
+            except Exception as e:
+                logger.debug("Клик 'Вставить из буфера': %s", e)
+
+        if not pasted:
+            self._paste_clipboard()
+            time.sleep(0.2)
+
+        transitioned = False
+        if link_dlg:
+            try:
+                for btn in link_dlg.descendants(control_type="Button"):
+                    txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
+                    if txt == "перейти":
+                        btn.click_input()
+                        transitioned = True
+                        time.sleep(0.5)
+                        break
+            except Exception:
+                pass
+
+        if not transitioned:
+            self._hotkey_enter()
+
+        time.sleep(3.0)
+        self._wait_1c_ready(min_wait=2.0, max_wait=8.0)
+        print(f"[1С:Windows] ✓ Раздел «{section_title}» открыт по прямой ссылке.")
+        self._section_opened = True
 
     # ---------------------------------------------------------------------
     # Вспомогательные методы работы с экраном и пикселями (1920x1080)
@@ -777,6 +794,10 @@ class WindowsOneCService(OneCServiceInterface):
         field_name = self.cfg.onec_org_filter_field  # "Организация"
         org_value = self.cfg.onec_org_filter_value   # 'ООО "ФК ПУЛЬС"'
 
+        if self._org_filter_applied:
+            print(f"[1С:Windows] ✓ Фильтр «{field_name}: {org_value}» уже установлен ранее — пропускаем повторную установку.")
+            return
+
         print(f"[1С:Windows] Установка фильтра «{field_name}: {org_value}» (Еще -> Расширенный поиск)...")
 
         # 1. Сбрасываем любой старый фильтр перед открытием «Расширенного поиска»
@@ -840,6 +861,7 @@ class WindowsOneCService(OneCServiceInterface):
         # Дожидаемся полной загрузки отфильтрованного списка (контроль спиннера «Поиск...» и желтого выделения первой строки)
         self._wait_1c_search_results(before_sig=None, min_wait=5.0, max_wait=25.0)
         print(f"[1С:Windows] ✓ Фильтр «{field_name}: {org_value}» установлен и загружен.")
+        self._org_filter_applied = True
 
     # ---------------------------------------------------------------------
     # Шаг 4: Поиск номера точки в списке и вход в карточку двойным кликом
@@ -1086,12 +1108,17 @@ class WindowsOneCService(OneCServiceInterface):
         self._find_and_activate_1c()
 
         # 2. Переходим в раздел «Адреса доставки» по прямой ссылке e1cib/list/Справочник.АдресаДоставки
-        self._activate_tab_or_open_link(
-            self.cfg.url_adresa_dostavki,
-            self.cfg.title_adresa_dostavki,
-        )
+        # Если раздел уже открыт и активен — не тратим время на повторный переход
+        if not self._section_opened or not self._is_section_active(self.cfg.title_adresa_dostavki):
+            self._activate_tab_or_open_link(
+                self.cfg.url_adresa_dostavki,
+                self.cfg.title_adresa_dostavki,
+            )
+        else:
+            print(f"[1С:Windows] Раздел «{self.cfg.title_adresa_dostavki}» уже открыт и активен.")
 
         # 3. Выставляем фильтр: Еще -> Расширенный поиск -> Где искать: Организация -> Что искать: ООО "ФК ПУЛЬС" -> Найти
+        # (выполняется только один раз за сессию; для последующих точек пропускается)
         self._ensure_organization_filter()
 
         # 4. Вставляем номер точки в поиск, дожидаемся загрузки и дважды кликаем по найденной строке
