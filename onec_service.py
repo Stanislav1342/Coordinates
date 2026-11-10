@@ -391,8 +391,18 @@ class WindowsOneCService(OneCServiceInterface):
         time.sleep(0.3)
 
         try:
-            self._send_vk(self.win32con.VK_MENU, down=True)
-            self._send_vk(self.win32con.VK_MENU, down=False)
+            self.win32gui.SetWindowPos(
+                hwnd,
+                self.win32con.HWND_TOPMOST,
+                0, 0, 0, 0,
+                self.win32con.SWP_NOMOVE | self.win32con.SWP_NOSIZE | self.win32con.SWP_SHOWWINDOW,
+            )
+            self.win32gui.SetWindowPos(
+                hwnd,
+                self.win32con.HWND_NOTOPMOST,
+                0, 0, 0, 0,
+                self.win32con.SWP_NOMOVE | self.win32con.SWP_NOSIZE | self.win32con.SWP_SHOWWINDOW,
+            )
             self.win32gui.SetForegroundWindow(hwnd)
         except Exception:
             pass
@@ -445,32 +455,133 @@ class WindowsOneCService(OneCServiceInterface):
 
         return False
 
+    def _close_dialog_if_open(self, title_sub: str) -> bool:
+        """Закрывает диалоговое окно (например, Калькулятор), если оно открыто."""
+        dlg = self._find_dialog(title_sub, timeout=0.8)
+        if dlg:
+            print(f"[1С:Windows] Закрытие открытого окна «{title_sub}»...")
+            try:
+                dlg.close()
+                time.sleep(0.4)
+                return True
+            except Exception:
+                try:
+                    dlg.set_focus()
+                    self._hotkey_esc()
+                    time.sleep(0.4)
+                    return True
+                except Exception:
+                    pass
+        return False
+
+    def _is_section_active(self, section_title: str) -> bool:
+        """Проверяет, открыт ли раздел section_title в активной рабочей области 1С."""
+        if not self.main_win:
+            return False
+        kw = section_title.lower().strip()
+        synonyms = [kw]
+        if "адрес" in kw:
+            synonyms.extend(["адреса доставки", "адрес"])
+        try:
+            main_r = self.main_win.rectangle()
+            for el in self.main_win.descendants():
+                try:
+                    txt = (el.element_info.name or el.window_text() or "").strip().lower()
+                    if not txt:
+                        continue
+                    if "(адреса доставки)" in txt:
+                        continue
+                    if any(s in txt for s in synonyms):
+                        r = el.rectangle()
+                        if (main_r.top + 20 <= r.top <= main_r.top + 100 and r.left < main_r.left + 600) or \
+                           (r.top >= main_r.bottom - 80 and r.width() > 30):
+                            return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        return False
+
     def _activate_tab_or_open_link(self, url: str, section_title: str) -> None:
         """
-        Гарантированно и мгновенно (без долгого сканирования дерева UIA) переходит
-        в раздел «Адреса доставки» по прямой навигационной ссылке 1С:
-          1. Копирует URL в буфер обмена.
-          2. Нажимает Shift+F11 (в 1С открывается окно «Переход по ссылке», фокус сразу в поле «Ссылка:»).
-          3. Вставляет URL (Ctrl+A -> Ctrl+V) и нажимает Enter (кнопка «Перейти» по умолчанию).
-        ВАЖНО: НЕ отправляет Escape перед Shift+F11, так как в 1С:Предприятие 8.3 нажатие Esc
-        в обычной форме закрывает текущий открытый у пользователя раздел (вкладку)!
+        Гарантированно открывает раздел «Адреса доставки» в 1С БЕЗ закрытия других разделов:
+          1. Закрывает окно «Калькулятор» (или «Переход по ссылке»), если оно осталось открытым.
+          2. Если вкладка «Адреса доставки» уже открыта на нижней панели — кликает по ней.
+          3. Если не открыта — открывает через Избранное ⭐ (клик по ⭐ на 1625, 15 -> клик «Адреса доставки» на 1420, 120).
+          4. Если через Избранное не открылась — нажимает кнопку прямой ссылки 🔗 на 1833, 50, вставляет URL и жмет Перейти.
+          5. Контролирует, что раздел реально открылся, и только после этого продолжает работу.
         """
-        print(f"\n[1С:Windows] Переход в раздел «{section_title}» по прямой ссылке (Shift+F11)...")
-        print(f"             URL: {url}")
+        print(f"\n[1С:Windows] Переход в раздел «{section_title}»...")
 
-        set_clipboard(url)
-        time.sleep(0.1)
+        # 1. Закрываем возможно оставшиеся модальные окна (Калькулятор, Переход по ссылке)
+        self._close_dialog_if_open("Калькулятор")
+        self._close_dialog_if_open("Переход по ссылке")
 
-        self._hotkey_shift_f11()
+        # 2. Если вкладка уже есть на нижней панели открытых вкладок — просто переключаемся
+        if self._activate_tab_by_name(section_title):
+            time.sleep(1.0)
+            print(f"[1С:Windows] ✓ Раздел «{section_title}» активирован из открытых вкладок.")
+            return
+
+        # 3. Открываем через Избранное ⭐ (пользовательский сценарий)
+        print(f"[1С:Windows] Открытие раздела «{section_title}» через Избранное ⭐...")
+        star_x, star_y = self._scale_xy(1625, 15)
+        self.pywinauto.mouse.click(coords=(star_x, star_y))
+        time.sleep(0.7)
+
+        # Ищем пункт «Адреса доставки» в открывшемся списке Избранного
+        opened_via_fav = False
+        try:
+            for w in self.Desktop(backend="uia").windows():
+                for el in w.descendants():
+                    txt = (el.element_info.name or el.window_text() or "").strip()
+                    if txt == "Адреса доставки":
+                        el.click_input()
+                        opened_via_fav = True
+                        break
+                if opened_via_fav:
+                    break
+        except Exception:
+            pass
+
+        if not opened_via_fav:
+            # Клик по первой строке меню Избранного на (1420, 120)
+            item_x, item_y = self._scale_xy(1420, 120)
+            self.pywinauto.mouse.click(coords=(item_x, item_y))
+
+        time.sleep(2.0)
+        self._wait_1c_ready(min_wait=1.5, max_wait=6.0)
+
+        # Проверяем, открылся ли раздел
+        if self._activate_tab_by_name(section_title) or self._is_section_active(section_title):
+            print(f"[1С:Windows] ✓ Раздел «{section_title}» успешно открыт через Избранное.")
+            return
+
+        # 4. Fallback: Переход по прямой ссылке через кнопку 🔗 (1833, 50)
+        print(f"[1С:Windows] Открытие через кнопку прямой ссылки 🔗 (1833, 50)...")
+        link_x, link_y = self._scale_xy(1833, 50)
+        self.pywinauto.mouse.click(coords=(link_x, link_y))
         time.sleep(0.8)
 
-        # В открывшемся окне «Переход по ссылке» фокус уже стоит в поле «Ссылка:» (см. s_057.png)
-        self._select_all_and_paste(url)
-        time.sleep(0.25)
-        self._hotkey_enter()
+        goto_dlg = self._find_dialog("Переход по ссылке", timeout=2.0)
+        if goto_dlg:
+            set_clipboard(url)
+            time.sleep(0.1)
+            self._select_all_and_paste(url)
+            time.sleep(0.2)
+            self._hotkey_enter()
+            self._wait_1c_ready(min_wait=2.0, max_wait=8.0)
 
-        self._wait_1c_ready(min_wait=2.5, max_wait=8.0)
-        print(f"[1С:Windows] ✓ Раздел «{section_title}» успешно открыт по прямой ссылке.")
+        # 5. Финальная проверка, что открыт именно нужный раздел
+        time.sleep(1.0)
+        if self._activate_tab_by_name(section_title) or self._is_section_active(section_title):
+            print(f"[1С:Windows] ✓ Раздел «{section_title}» успешно открыт.")
+            return
+
+        raise RuntimeError(
+            f"Не удалось открыть раздел «{section_title}» в 1С!\n"
+            f"Пожалуйста, откройте вкладку «{section_title}» в 1С вручную перед запуском скрипта."
+        )
 
     # ---------------------------------------------------------------------
     # Вспомогательные методы работы с экраном и пикселями (1920x1080)
