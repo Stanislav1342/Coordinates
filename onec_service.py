@@ -10,22 +10,25 @@ onec_service.py — Сервис взаимодействия с 1С:Предп�
          URL: e1cib/list/Справочник.АдресаДоставки
          (В диалоге «Переход по ссылке» нажимается кнопка «Вставить из буфера» и «Перейти»).
     3. Установка фильтра по организации перед поиском точки:
-       - Проверка, установлен ли уже фильтр «Организация: ООО "ФК ПУЛЬС"» (и удаление ошибочного
-         фильтра «Наименование: ООО "ФК ПУЛЬС"», если он остался от предыдущего запуска).
+       - Проверка, установлен ли уже фильтр «Организация: ООО "ФК ПУЛЬС"» (и удаление любого
+         постороннего фильтра, например «Наименование: ...», через Ctrl+Q или крестик плашки).
        - Клик «Еще» -> «Расширенный поиск» (или Alt+F).
        - В окне «Найти»:
-         * В строке «Где искать:» открывается выпадающий список (клик по стрелке или Alt+Down)
-           и выбирается пункт «Организация» (с обязательной проверкой, что поле изменилось на «Организация»!).
-         * В строке «Что искать:» вставляется «ООО "ФК ПУЛЬС"» и выбирается элемент из выпадающего списка.
-         * Нажимается кнопка «Найти» и ожидается полная загрузка фильтра «Организация: ООО "ФК ПУЛЬС"».
+         * В строке «Где искать:» раскрывается выпадающий список (кликом по стрелке [v] в (1205, 455))
+           и одним кликом выбирается строка «Организация» в (866, 600).
+           ВАЖНО: текстовая вставка в «Где искать» НЕ используется, так как «Где искать» — это
+           нередактируемый список колонок!
+         * В строке «Что искать:» (866, 488) вставляется «ООО "ФК ПУЛЬС"», выбирается элемент из
+           выпадающего списка (866, 518) и нажимается кнопка «Найти» (1042, 602).
+         * Скрипт дожидается полной загрузки фильтра «Организация: ООО "ФК ПУЛЬС"».
     4. Поиск точки доставки в списке «Адреса доставки»:
-       - Клик в поле поиска «Поиск (Ctrl+F)» и проверка, что текст номера точки («МСК...»)
-         реально вставился в поле поиска перед нажатием Enter.
-       - Нажатие Enter и ожидание загрузки результатов поиска.
-       - Двойной клик по найденной строке в таблице, чтобы провалиться внутрь карточки точки,
+       - Клик в поле поиска «Поиск (Ctrl+F)» (1580, 126) или вызов Ctrl+F.
+       - Вставка номера точки («МСК...») через буфер обмена и нажатие Enter.
+       - Ожидание загрузки результатов поиска.
+       - Двойной клик по найденной строке в таблице (260, 250), чтобы провалиться внутрь карточки точки,
          и проверка, что в открывшейся карточке поле «Код:» совпадает с искомым номером точки!
     5. В открывшейся карточке точки доставки:
-       - Переход в раздел (вкладку) «Адресная информация».
+       - Переход в раздел (вкладку) «Адресная информация» (315, 362).
        - Заполнение полей «Широта», «Долгота» и (при необходимости) «Радиус зоны» через буфер обмена.
        - Установка галочки «Координаты проверены».
        - Нажатие «Записать и закрыть» (или Ctrl+Enter через виртуальные клавиши).
@@ -295,7 +298,7 @@ class WindowsOneCService(OneCServiceInterface):
     # ---------------------------------------------------------------------
     # Надежный поиск диалогов в Windows (Win32 EnumWindows + Desktop UIA)
     # ---------------------------------------------------------------------
-    def _find_dialog(self, title_sub: str, timeout: float = 5.0):
+    def _find_dialog(self, title_sub: str, timeout: float = 4.0):
         """
         Гарантированно находит диалоговое окно 1С по подстроке заголовка:
         1. Среди отдельных окон верхнего уровня (Win32 EnumWindows / Desktop UIA).
@@ -426,7 +429,6 @@ class WindowsOneCService(OneCServiceInterface):
                     txt = (el.element_info.name or el.window_text() or "").strip().lower()
                     if not txt:
                         continue
-                    # Важно: не путать общий справочник «Адреса доставки» с открытой карточкой «... (Адреса доставки)»
                     if "(адреса доставки)" in txt:
                         continue
                     if any(s in txt for s in synonyms):
@@ -450,6 +452,10 @@ class WindowsOneCService(OneCServiceInterface):
         """
         print(f"\n[1С:Windows] Переход в раздел «{section_title}» по прямой ссылке (Shift+F11)...")
         print(f"             URL: {url}")
+
+        # Если вдруг остался открытым какой-то модальный диалог (например, «Найти») — закрываем его
+        self._hotkey_esc()
+        time.sleep(0.2)
 
         set_clipboard(url)
         time.sleep(0.1)
@@ -509,12 +515,11 @@ class WindowsOneCService(OneCServiceInterface):
     # ---------------------------------------------------------------------
     # Шаг 3: Установка фильтра Организация = ООО "ФК ПУЛЬС" (Расширенный поиск)
     # ---------------------------------------------------------------------
-    def _check_and_clean_filter_pills(self) -> bool:
+    def _is_org_filter_pill_present(self) -> bool:
         """
-        Проверяет плашки активного фильтра над таблицей «Адреса доставки» (y ≈ 175..215):
-        - Если видна ошибочная плашка «Наименование: ...» (например, «Наименование: ООО "ФК ПУЛЬС"»),
-          сбрасывает её кликом по крестику [x] на плашке или через Ctrl+Q.
-        - Если установлена правильная плашка «Организация: ООО "ФК ПУЛЬС"» — возвращает True.
+        Проверяет, установлена ли уже плашка «Организация: ООО "ФК ПУЛЬС"» над таблицей.
+        Если видна неверная плашка («Наименование: ...», «Полное наименование: ...» и т.д.) —
+        сбрасывает её через клик по крестику плашки и Ctrl+Q.
         """
         if not self.main_win:
             return False
@@ -531,16 +536,15 @@ class WindowsOneCService(OneCServiceInterface):
                         txt = self._get_element_text(el).lower()
                         if not txt:
                             continue
-                        if "наименование:" in txt or ("наименование" in txt and "пульс" in txt):
+                        if "организация" in txt and "фк пульс" in txt and "наименование" not in txt:
+                            org_filter_found = True
+                        elif any(bad in txt for bad in ("наименование:", "полное наименование:", "код:", "контрагент:")):
                             wrong_filter_found = True
-                            # Крестик закрытия плашки находится в правом краю плашки (r.right - 8, center_y)
                             close_x = r.right - 8
                             close_y = r.top + r.height() // 2
-                            print(f"[1С:Windows] Сброс неверного фильтра «{txt}» ({close_x}, {close_y})...")
+                            print(f"[1С:Windows] Сброс постороннего фильтра «{txt}» ({close_x}, {close_y})...")
                             self.pywinauto.mouse.click(coords=(close_x, close_y))
-                            time.sleep(1.5)
-                        elif "организация" in txt and "фк пульс" in txt:
-                            org_filter_found = True
+                            time.sleep(1.0)
                 except Exception:
                     continue
         except Exception as e:
@@ -553,14 +557,11 @@ class WindowsOneCService(OneCServiceInterface):
 
         return org_filter_found
 
-    def _click_list_more_button(self) -> bool:
+    def _click_list_more_button(self) -> None:
         """
         Нажимает кнопку «Еще ▾» на командной панели списка «Адреса доставки»
         (в максимизированном окне 1920x1080: x=1827, y=126).
         """
-        if not self.main_win:
-            return False
-
         try:
             main_r = self.main_win.rectangle()
             more_btns = []
@@ -579,26 +580,21 @@ class WindowsOneCService(OneCServiceInterface):
                 r = target_btn.rectangle()
                 click_x = r.left + r.width() // 2
                 click_y = r.top + r.height() // 2
-                print(f"[1С:Windows] Клик по кнопке «Еще» на панели списка ({click_x}, {click_y})...")
+                print(f"[1С:Windows] Клик по кнопке «Еще» ({click_x}, {click_y})...")
                 self.pywinauto.mouse.click(coords=(click_x, click_y))
-                return True
+                return
         except Exception as e:
             logger.debug("UIA поиск кнопки Еще: %s", e)
 
-        # Точные координаты кнопки «Еще» на сетке 1920x1080 (см. grid_toolbar_52s.png: x=1827, y=126)
-        try:
-            main_r = self.main_win.rectangle()
-            click_x = main_r.right - 91
-            click_y = main_r.top + 126
-            print(f"[1С:Windows] Координатный клик по кнопке «Еще» ({click_x}, {click_y})...")
-            self.pywinauto.mouse.click(coords=(click_x, click_y))
-            return True
-        except Exception:
-            return False
+        main_r = self.main_win.rectangle()
+        click_x = main_r.right - 91   # 1827 на 1920x1080
+        click_y = main_r.top + 126    # 126 на 1920x1080
+        print(f"[1С:Windows] Координатный клик по кнопке «Еще» ({click_x}, {click_y})...")
+        self.pywinauto.mouse.click(coords=(click_x, click_y))
 
-    def _click_advanced_search_in_menu(self) -> bool:
+    def _click_advanced_search_in_menu(self) -> None:
         """
-        В открывшемся меню «Еще» находит и нажимает пункт «Расширенный поиск»
+        В открывшемся меню «Еще» нажимает пункт «Расширенный поиск»
         (в максимизированном окне 1920x1080: x=1810, y=318).
         """
         time.sleep(0.5)
@@ -615,7 +611,7 @@ class WindowsOneCService(OneCServiceInterface):
                                     click_y = r.top + r.height() // 2
                                     print(f"[1С:Windows] Клик по пункту меню «Расширенный поиск» ({click_x}, {click_y})...")
                                     self.pywinauto.mouse.click(coords=(click_x, click_y))
-                                    return True
+                                    return
                         except Exception:
                             continue
                 except Exception:
@@ -623,38 +619,48 @@ class WindowsOneCService(OneCServiceInterface):
         except Exception as e:
             logger.debug("Поиск пункта меню 'Расширенный поиск': %s", e)
 
-        try:
-            main_r = self.main_win.rectangle()
-            click_x = main_r.right - 108
-            click_y = main_r.top + 318
-            print(f"[1С:Windows] Координатный клик по пункту «Расширенный поиск» ({click_x}, {click_y})...")
-            self.pywinauto.mouse.click(coords=(click_x, click_y))
-            return True
-        except Exception:
-            return False
+        main_r = self.main_win.rectangle()
+        click_x = main_r.right - 108  # 1810 на 1920x1080
+        click_y = main_r.top + 318    # 318 на 1920x1080
+        print(f"[1С:Windows] Координатный клик по пункту «Расширенный поиск» ({click_x}, {click_y})...")
+        self.pywinauto.mouse.click(coords=(click_x, click_y))
 
-    def _select_where_field_in_find_dialog(self, find_dlg, field_name: str = "Организация") -> None:
+    def _ensure_organization_filter(self) -> None:
         """
-        В открытом диалоге «Найти» гарантированно переключает поле «Где искать:»
-        с «Наименование» на «Организация».
-
-        Точные координаты на 1920x1080 (проверено по пиксельной сетке grid_find_dlg_40s.png и grid_dropdown_67.png):
-          • Само окно «Найти»: left=686, top=396, right=1233, bottom=636
-          • Поле «Где искать:»: left=780..1214, top=442..468 (центр y = 455)
-          • Кнопка-стрелка [v] поля «Где искать:»: x = 1204, y = 455 (или dlg_right - 29, dlg_top + 59)
-          • В открывшемся списке под «Где искать:» (grid_dropdown_67.png):
-              1) Код                  -> y = 480 (where_y + 25)
-              2) Наименование         -> y = 510 (where_y + 55)
-              3) Полное наименование  -> y = 540 (where_y + 85)
-              4) Контрагент           -> y = 570 (where_y + 115)
-              5) Организация          -> y = 600 (where_y + 145)
+        Выполняет точную последовательность установки фильтра «Организация: ООО "ФК ПУЛЬС"»:
+        1. Проверяет, не установлен ли уже фильтр «Организация: ООО "ФК ПУЛЬС"».
+        2. Нажимает «Еще» -> «Расширенный поиск».
+        3. В диалоге «Найти»:
+           - Кликает строго по стрелке раскрытия списка «Где искать:» (x=1205, y=455).
+           - В раскрывшемся списке кликает строго по строке «Организация» (x=866, y=600).
+             (Никакой вставки текста в «Где искать» не выполняется!)
+           - Кликает в поле «Что искать:» (x=866, y=488), вставляет 'ООО "ФК ПУЛЬС"'.
+           - Кликает по появившейся подсказке 'ООО "ФК ПУЛЬС"' под полем (x=866, y=518).
+           - Кликает по желтой кнопке «Найти» (x=1042, y=602).
+        4. Дожидается полной загрузки фильтра в таблице (4.5 сек + проверка готовности окна 1С).
         """
-        print(f"[1С:Windows]   • Установка поля «Где искать:» -> «{field_name}»...")
+        field_name = self.cfg.onec_org_filter_field  # "Организация"
+        org_value = self.cfg.onec_org_filter_value   # 'ООО "ФК ПУЛЬС"'
 
-        # Определяем точные координаты поля «Где искать:» и его стрелки [v]
-        where_box = None
+        # 1. Проверяем, не стоит ли уже правильный фильтр (и чистим любой ошибочный фильтр)
+        if self._is_org_filter_pill_present():
+            print(f"[1С:Windows] ✓ Фильтр «{field_name}: {org_value}» уже установлен в списке.")
+            return
+
+        print(f"[1С:Windows] Установка фильтра «{field_name}: {org_value}» (Еще -> Расширенный поиск)...")
+
+        # Сбрасываем возможный старый фильтр перед открытием «Расширенного поиска»
+        self._hotkey_ctrl_q()
+        time.sleep(0.8)
+
+        # 2. Открываем меню «Еще» -> «Расширенный поиск»
+        self._click_list_more_button()
+        self._click_advanced_search_in_menu()
+        time.sleep(1.0)
+
+        # Определяем координаты окна «Найти» (на 1920x1080 всегда строго: left=686, top=396, right=1233, bottom=636)
         dlg_left, dlg_top, dlg_right, dlg_bottom = 686, 396, 1233, 636
-
+        find_dlg = self._find_dialog("найти", timeout=2.0)
         if find_dlg:
             try:
                 dr = find_dlg.rectangle()
@@ -663,313 +669,93 @@ class WindowsOneCService(OneCServiceInterface):
             except Exception:
                 pass
 
-        # Ищем верхнее поле (ComboBox / Edit) внутри области диалога «Найти»
-        search_root = find_dlg if find_dlg else self.main_win
-        try:
-            candidates = []
-            for el in search_root.descendants():
-                try:
-                    ct = getattr(el.element_info, "control_type", "")
-                    if ct in ("ComboBox", "Edit"):
-                        r = el.rectangle()
-                        if dlg_left <= r.left <= dlg_right and dlg_top + 25 <= r.top <= dlg_top + 80 and r.width() >= 150:
-                            candidates.append(el)
-                except Exception:
-                    continue
-            if candidates:
-                candidates.sort(key=lambda e: (e.rectangle().top, e.rectangle().left))
-                where_box = candidates[0]
-        except Exception as e:
-            logger.debug("Поиск контрола 'Где искать': %s", e)
-
-        # Вычисляем координаты центра поля «Где искать:» и его кнопки раскрытия [v]
-        if where_box is not None:
-            wr = where_box.rectangle()
-            where_center_x = wr.left + min(100, wr.width() // 3)
-            where_center_y = wr.top + wr.height() // 2
-            where_arrow_x = wr.right - 10
-            where_arrow_y = where_center_y
-        else:
-            # Эталонные координаты на 1920x1080 (grid_find_dlg_40s.png):
-            # поле «Где искать» расположено на x=780..1214, y=442..468
-            where_center_x = dlg_left + 180   # 866
-            where_center_y = dlg_top + 59     # 455
-            where_arrow_x = dlg_right - 29    # 1204
-            where_arrow_y = dlg_top + 59      # 455
-
-        # Проверяем, вдруг в «Где искать» уже выбрана «Организация»
-        if where_box is not None:
-            curr_txt = self._get_element_text(where_box).lower()
-            if "организац" in curr_txt:
-                print(f"[1С:Windows]   ✓ В поле «Где искать» уже стоит «{field_name}».")
-                return
-
         # -----------------------------------------------------------------
-        # Попытка 1: Клик по стрелке [v] поля «Где искать» (x=1204, y=455)
-        # и выбор пункта «Организация» из выпадающего списка (x=866, y=600)
+        # 3. В строке «Где искать:» выбираем «Организация»
+        #    Точные координаты на 1920x1080 (grid_find_dlg_40s.png и grid_dropdown_67.png):
+        #    • Стрелка [v] поля «Где искать:»: x = 1205 (dlg_right - 28), y = 455 (dlg_top + 59)
+        #    • Строка «Организация» в раскрытом списке: x = 866 (dlg_left + 180), y = 600 (dlg_top + 204)
         # -----------------------------------------------------------------
-        print(f"[1С:Windows]   • Клик по стрелке списка «Где искать» ({where_arrow_x}, {where_arrow_y})...")
+        where_arrow_x = dlg_right - 28   # 1205
+        where_arrow_y = dlg_top + 59     # 455
+        org_option_x = dlg_left + 180    # 866
+        org_option_y = dlg_top + 204     # 600
+
+        print(f"[1С:Windows]   1) Раскрытие списка «Где искать» ({where_arrow_x}, {where_arrow_y})...")
         self.pywinauto.mouse.click(coords=(where_arrow_x, where_arrow_y))
+        time.sleep(0.7)
+
+        print(f"[1С:Windows]   2) Выбор пункта «{field_name}» в списке ({org_option_x}, {org_option_y})...")
+        self.pywinauto.mouse.click(coords=(org_option_x, org_option_y))
         time.sleep(0.6)
 
-        selected_via_uia = False
-        try:
-            for w in self.Desktop(backend="uia").windows():
-                for it in w.descendants():
-                    try:
-                        txt = (it.element_info.name or it.window_text() or "").strip().lower()
-                        if txt == field_name.lower():
-                            ir = it.rectangle()
-                            if where_center_y + 10 <= ir.top <= where_center_y + 250 and ir.height() >= 12:
-                                click_x = ir.left + min(80, ir.width() // 3)
-                                click_y = ir.top + ir.height() // 2
-                                print(f"[1С:Windows]   • UIA клик по пункту «{field_name}» ({click_x}, {click_y})...")
-                                self.pywinauto.mouse.click(coords=(click_x, click_y))
-                                selected_via_uia = True
-                                break
-                    except Exception:
-                        continue
-                if selected_via_uia:
-                    break
-        except Exception:
-            pass
+        # -----------------------------------------------------------------
+        # 4. В строке «Что искать:» вводим и выбираем 'ООО "ФК ПУЛЬС"'
+        #    Точные координаты на 1920x1080 (grid_find_dlg_44s.png):
+        #    • Поле «Что искать:»: x = 866 (dlg_left + 180), y = 488 (dlg_top + 92)
+        #    • Выпадающая подсказка 'ООО "ФК ПУЛЬС"': x = 866 (dlg_left + 180), y = 518 (dlg_top + 122)
+        # -----------------------------------------------------------------
+        what_field_x = dlg_left + 180    # 866
+        what_field_y = dlg_top + 92      # 488
+        what_popup_x = dlg_left + 180    # 866
+        what_popup_y = dlg_top + 122     # 518
 
-        if not selected_via_uia:
-            # Точная координата строки «Организация» в выпадающем списке (см. grid_dropdown_67.png):
-            # where_center_y = 455, строка «Организация» находится на y = 600 (where_center_y + 145)
-            org_item_x = where_center_x
-            org_item_y = where_center_y + 145
-            print(f"[1С:Windows]   • Клик по строке «{field_name}» в выпадающем списке ({org_item_x}, {org_item_y})...")
-            self.pywinauto.mouse.click(coords=(org_item_x, org_item_y))
+        print(f"[1С:Windows]   3) Клик в поле «Что искать» ({what_field_x}, {what_field_y}) и вставка «{org_value}»...")
+        self.pywinauto.mouse.click(coords=(what_field_x, what_field_y))
+        time.sleep(0.3)
+        self._select_all_and_paste(org_value)
 
-        time.sleep(0.5)
+        # Ждем 1.2 сек появления выпадающей подсказки 1С с элементом справочника «ООО "ФК ПУЛЬС"»
+        time.sleep(1.2)
 
-        # Проверяем через UIA, сменилось ли значение поля «Где искать» на «Организация»
-        if where_box is not None:
-            curr_txt = self._get_element_text(where_box).lower()
-            if "организац" in curr_txt:
-                print(f"[1С:Windows]   ✓ Поле «Где искать» успешно переключено на «{field_name}».")
-                return
+        print(f"[1С:Windows]   4) Выбор «{org_value}» из выпадающего списка ({what_popup_x}, {what_popup_y})...")
+        self.pywinauto.mouse.click(coords=(what_popup_x, what_popup_y))
+        time.sleep(0.6)
 
         # -----------------------------------------------------------------
-        # Попытка 2 (железобетонный клавиатурный + буферный резерв):
-        # Фокусируем само текстовое поле «Где искать» (x=866, y=455),
-        # открываем список через Alt+Down (или вставляем "Организация") и выбираем.
+        # 5. Нажимаем желтую кнопку «Найти»
+        #    Точные координаты на 1920x1080 (grid_find_dlg_47s.png):
+        #    • Кнопка «Найти»: x = 1042 (dlg_left + 356), y = 602 (dlg_top + 206)
         # -----------------------------------------------------------------
-        print(f"[1С:Windows]   • Подтверждение выбора «{field_name}» в поле «Где искать» ({where_center_x}, {where_center_y})...")
-        self.pywinauto.mouse.click(coords=(where_center_x, where_center_y))
-        time.sleep(0.25)
+        find_btn_x = dlg_left + 356      # 1042
+        find_btn_y = dlg_top + 206       # 602
 
-        # Если список в 1С поддерживает ввод/вставку названия колонки — вставляем "Организация"
-        self._select_all_and_paste(field_name)
-        time.sleep(0.3)
-        self._hotkey_enter()
+        print(f"[1С:Windows]   5) Нажатие кнопки «Найти» ({find_btn_x}, {find_btn_y}) и ожидание прогрузки фильтра...")
+        self.pywinauto.mouse.click(coords=(find_btn_x, find_btn_y))
         time.sleep(0.3)
 
-        # Если после вставки в 1С ComboBox все еще показывает "Наименование" —
-        # проходим стрелкой вниз ровно 3 шага от "Наименование" до "Организация":
-        # (Код [1] -> Наименование [2] -> Полное наименование [3] -> Контрагент [4] -> Организация [5])
-        if where_box is not None:
-            curr_txt = self._get_element_text(where_box).lower()
-            if "наименование" in curr_txt and "полное" not in curr_txt:
-                print("[1С:Windows]   • Переключение с «Наименование» на «Организация» клавишами Down (3 шага)...")
-                self.pywinauto.mouse.click(coords=(where_center_x, where_center_y))
-                time.sleep(0.2)
-                self._send_hotkey(self.win32con.VK_MENU, self.win32con.VK_DOWN)  # Alt+Down
-                time.sleep(0.3)
-                for _ in range(3):
-                    self._send_hotkey(self.win32con.VK_DOWN)
-                    time.sleep(0.12)
-                self._hotkey_enter()
-                time.sleep(0.3)
-
-    def _ensure_organization_filter(self) -> None:
-        """
-        Устанавливает фильтр «Организация: ООО "ФК ПУЛЬС"» в разделе «Адреса доставки»
-        и ПРОВЕРЯЕТ, что в списке появилась именно плашка «Организация: ООО "ФК ПУЛЬС"»
-        (а не «Наименование: ООО "ФК ПУЛЬС"»).
-        """
-        field_name = self.cfg.onec_org_filter_field  # "Организация"
-        org_value = self.cfg.onec_org_filter_value   # 'ООО "ФК ПУЛЬС"'
-
-        # 1. Проверяем, не стоит ли уже правильный фильтр (и чистим ошибочный фильтр по Наименованию)
-        if self._check_and_clean_filter_pills():
-            print(f"[1С:Windows] ✓ Фильтр «{field_name}: {org_value}» уже активен.")
-            return
-
-        for attempt in range(1, 3):
-            print(
-                f"[1С:Windows] Установка фильтра «{field_name}: {org_value}» "
-                f"(Еще -> Расширенный поиск, попытка {attempt}/2)..."
-            )
-
-            # Открываем меню «Еще» -> «Расширенный поиск»
-            self._click_list_more_button()
-            self._click_advanced_search_in_menu()
-
-            find_dlg = self._find_dialog("найти", timeout=3.0)
-            if not find_dlg:
-                print("[1С:Windows] Вызов диалога «Расширенный поиск» через Alt+F...")
-                self._hotkey_esc()
-                time.sleep(0.2)
-                self._hotkey_alt_f()
-                find_dlg = self._find_dialog("найти", timeout=3.5)
-
-            # Определяем границы диалога «Найти» (на 1920x1080: left=686, top=396, right=1233, bottom=636)
-            dlg_left, dlg_top, dlg_right, dlg_bottom = 686, 396, 1233, 636
-            if find_dlg:
-                try:
-                    dr = find_dlg.rectangle()
-                    if 300 <= dr.width() <= 900 and 150 <= dr.height() <= 500:
-                        dlg_left, dlg_top, dlg_right, dlg_bottom = dr.left, dr.top, dr.right, dr.bottom
-                except Exception:
-                    pass
-
-            # 2. Выбираем «Организация» в поле «Где искать:»
-            self._select_where_field_in_find_dialog(find_dlg, field_name=field_name)
-
-            # 3. Заполняем поле «Что искать:» -> 'ООО "ФК ПУЛЬС"'
-            # Точные координаты поля «Что искать:» на 1920x1080 (см. grid_find_dlg_44s.png):
-            # x = 866 (dlg_left + 180), y = 488 (dlg_top + 92)
-            what_x = dlg_left + 180
-            what_y = dlg_top + 92
-
-            print(f"[1С:Windows]   • Ввод «{org_value}» в поле «Что искать» ({what_x}, {what_y})...")
-            self.pywinauto.mouse.click(coords=(what_x, what_y))
-            time.sleep(0.3)
-            self._select_all_and_paste(org_value)
-
-            # Ждем появления выпадающей подсказки 1С с элементом справочника «ООО "ФК ПУЛЬС"» (см. grid_find_dlg_44s.png)
-            time.sleep(1.0)
-
-            # В grid_find_dlg_44s.png строка «ООО "ФК ПУЛЬС"» в выпадающем списке под «Что искать»
-            # расположена на x = 866, y = 518 (what_y + 30)
-            autocomplete_clicked = False
-            try:
-                for w in self.Desktop(backend="uia").windows():
-                    for it in w.descendants():
-                        try:
-                            txt = (it.element_info.name or it.window_text() or "").strip().lower()
-                            if "фк пульс" in txt:
-                                ir = it.rectangle()
-                                if what_y + 10 <= ir.top <= what_y + 80:
-                                    click_x = ir.left + min(60, ir.width() // 2)
-                                    click_y = ir.top + ir.height() // 2
-                                    print(f"[1С:Windows]   • UIA выбор «{org_value}» из подсказки ({click_x}, {click_y})...")
-                                    self.pywinauto.mouse.click(coords=(click_x, click_y))
-                                    autocomplete_clicked = True
-                                    break
-                        except Exception:
-                            continue
-                    if autocomplete_clicked:
-                        break
-            except Exception:
-                pass
-
-            if not autocomplete_clicked:
-                popup_x = what_x
-                popup_y = what_y + 30  # 518
-                print(f"[1С:Windows]   • Клик по выпадающей подсказке «{org_value}» ({popup_x}, {popup_y})...")
-                self.pywinauto.mouse.click(coords=(popup_x, popup_y))
-
-            time.sleep(0.5)
-
-            # 4. Нажимаем желтую кнопку «Найти»
-            # Точные координаты кнопки «Найти» на 1920x1080 (см. grid_find_dlg_47s.png):
-            # x = 1042 (dlg_left + 356), y = 602 (dlg_top + 206)
-            print("[1С:Windows]   • Нажатие кнопки «Найти» и ожидание загрузки фильтра...")
-            find_btn_clicked = False
-            try:
-                search_root = find_dlg if find_dlg else self.main_win
-                for btn in search_root.descendants(control_type="Button"):
-                    try:
-                        txt = (btn.element_info.name or btn.window_text() or "").strip().lower()
-                        if txt == "найти":
-                            br = btn.rectangle()
-                            if dlg_top + 140 <= br.top <= dlg_bottom + 40:
-                                btn.click_input()
-                                find_btn_clicked = True
-                                break
-                    except Exception:
-                        continue
-            except Exception:
-                pass
-
-            if not find_btn_clicked:
-                btn_x = dlg_left + 356  # 1042
-                btn_y = dlg_top + 206   # 602
-                self.pywinauto.mouse.click(coords=(btn_x, btn_y))
-                time.sleep(0.25)
-                if self._find_dialog("найти", timeout=0.6):
-                    self._hotkey_enter()
-
-            # 5. Дожидаемся полной загрузки отфильтрованного списка
-            self._wait_1c_ready(min_wait=4.0, max_wait=12.0)
-
-            # 6. Проверяем, что установился именно фильтр «Организация: ООО "ФК ПУЛЬС"»
-            if self._check_and_clean_filter_pills():
-                print(f"[1С:Windows] ✓ Фильтр «{field_name}: {org_value}» успешно установлен и загружен!")
-                return
-
-        print(f"[1С:Windows] ⚠ Завершена установка фильтра «{field_name}: {org_value}».")
+        # Дожидаемся полной загрузки отфильтрованного списка (на видео фильтрация занимает ~3.5-4.5 секунды)
+        self._wait_1c_ready(min_wait=4.5, max_wait=14.0)
+        print(f"[1С:Windows] ✓ Фильтр «{field_name}: {org_value}» установлен и загружен.")
 
     # ---------------------------------------------------------------------
     # Шаг 4: Поиск номера точки в списке и вход в карточку двойным кликом
     # ---------------------------------------------------------------------
     def _focus_and_paste_in_search_box(self, query: str) -> None:
         """
-        Кликает в поле поиска списка «Поиск (Ctrl+F)» на командной панели «Адреса доставки»,
-        вставляет номер точки, проверяет, что текст вставился, нажимает Enter и ждет загрузки.
+        Вставляет номер точки в поле «Поиск (Ctrl+F)» на командной панели «Адреса доставки»,
+        нажимает Enter и дожидается полной загрузки результатов поиска.
 
         Точные координаты на 1920x1080 (см. grid_toolbar_52s.png):
           • Поле «Поиск (Ctrl+F)»: left=1474..1722, top=113..139 (центр: x=1580, y=126)
-          • Кнопка очистки поиска [x]: x=1710, y=126
         """
-        print(f"[1С:Windows] Вставка номера точки в поле поиска: '{query}'...")
+        print(f"[1С:Windows] Поиск номера точки в списке: '{query}'...")
 
-        # Находим Edit-контрол поля поиска списка через UIA
-        search_edit = None
-        try:
-            main_r = self.main_win.rectangle()
-            for el in self.main_win.descendants(control_type="Edit"):
-                try:
-                    r = el.rectangle()
-                    if main_r.top + 100 <= r.top <= main_r.top + 155 and r.left >= main_r.left + 1200 and r.width() >= 100:
-                        search_edit = el
-                        break
-                except Exception:
-                    continue
-        except Exception as e:
-            logger.debug("UIA поиск поля 'Поиск (Ctrl+F)': %s", e)
+        # Страховка: если вдруг осталось открытым какое-то всплывающее меню, закрываем его не сбивая фильтр
+        main_r = self.main_win.rectangle()
+        search_x = main_r.right - 338   # 1580 на 1920x1080
+        search_y = main_r.top + 126     # 126 на 1920x1080
 
-        if search_edit is not None:
-            r = search_edit.rectangle()
-            click_x = r.left + min(80, r.width() // 2)
-            click_y = r.top + r.height() // 2
-        else:
-            main_r = self.main_win.rectangle()
-            click_x = main_r.right - 338  # 1580 на 1920x1080
-            click_y = main_r.top + 126    # 126 на 1920x1080
-
-        # Кликаем в поле поиска, вставляем запрос и проверяем результат
-        print(f"[1С:Windows] Клик в поле «Поиск (Ctrl+F)» ({click_x}, {click_y})...")
-        self.pywinauto.mouse.click(coords=(click_x, click_y))
+        # 1. Кликаем прямо в поле «Поиск (Ctrl+F)»
+        print(f"[1С:Windows] Клик в поле «Поиск (Ctrl+F)» ({search_x}, {search_y})...")
+        self.pywinauto.mouse.click(coords=(search_x, search_y))
         time.sleep(0.35)
+
+        # 2. Вставляем номер точки через буфер обмена (Ctrl+A -> Ctrl+V) и нажимаем Enter
         self._select_all_and_paste(query)
-        time.sleep(0.3)
-
-        # Если есть UIA-доступ к полю поиска — проверяем, что номер точки реально вставился
-        if search_edit is not None:
-            current_val = self._get_element_text(search_edit)
-            if query.lower() not in current_val.lower():
-                print("[1С:Windows] Повторная фокусировка поля поиска через Ctrl+F и вставка...")
-                self._hotkey_ctrl_f()
-                time.sleep(0.4)
-                self._select_all_and_paste(query)
-                time.sleep(0.3)
-
-        # Нажимаем Enter для запуска поиска и ждем загрузки результатов
+        time.sleep(0.35)
         self._hotkey_enter()
+
+        # 3. Ожидаем завершения загрузки поиска (пока прогрузится спиннер «Поиск...»)
         print(f"[1С:Windows] Ожидание загрузки результатов поиска для '{query}'...")
         self._wait_1c_ready(min_wait=3.5, max_wait=10.0)
 
@@ -1001,7 +787,7 @@ class WindowsOneCService(OneCServiceInterface):
         КРИТИЧЕСКАЯ ЗАЩИТА:
         Проверяет, что открытая в 1С карточка действительно принадлежит искомой точке
         (сверяет поле «Код:» или заголовок карточки с expected_code / expected_client).
-        Если открылась чужая карточка — закрывает её через Esc / Ctrl+F4 и возвращает False,
+        Если открылась чужая карточка — закрывает её через Ctrl+F4 и возвращает False,
         чтобы скрипт ни при каких обстоятельствах не перезаписал координаты чужой точки!
         """
         if not expected_code and not expected_client:
@@ -1022,13 +808,11 @@ class WindowsOneCService(OneCServiceInterface):
 
             joined = " | ".join(all_texts)
 
-            # Если код точки (например, мск000132723) присутствует в открытой карточке — это 100% наша точка
             if code_low and code_low in joined:
                 print(f"[1С:Windows] ✓ Проверка безопасности: код точки '{expected_code}' подтвержден в карточке.")
                 return True
 
-            # Если в карточке виден другой код МСК.../БРН... и нашего кода нет — это ЧУЖАЯ карточка!
-            other_codes = re.findall(r"\b(?:мск|брн)\d{6,12}\b", joined)
+            other_codes = re.findall(r"\b(?:мск|брн|влг|спб|екб|нск|кзн|рнд|смр|вшн|тул|ирк|орл|клг)\d{5,12}\b", joined)
             if code_low and other_codes and code_low not in other_codes:
                 print(
                     f"[1С:Windows] ⚠ ЗАЩИТА: Открылась карточка с чужим кодом ({other_codes[0].upper()} "
@@ -1080,7 +864,7 @@ class WindowsOneCService(OneCServiceInterface):
             logger.debug("UIA поиск строки в таблице: %s", e)
 
         # 2. Если UIA не отдал текст строки табличного поля 1С — делаем двойной клик
-        # точно по первой строке таблицы (см. grid_toolbar_52s.png и f_80s.png: x=260, y=250)
+        # точно по первой найденной строке таблицы (см. grid_toolbar_52s.png и f_80s.png: x=260, y=250)
         if not row_clicked:
             first_row_x = main_r.left + 260
             first_row_y = main_r.top + 250
@@ -1101,7 +885,6 @@ class WindowsOneCService(OneCServiceInterface):
         if not self._is_address_card_open():
             return False
 
-        # 3. Проверяем, что открытая карточка действительно принадлежит нашей точке
         return self._verify_opened_card_matches_point(expected_code=code, expected_client=client_name)
 
     def _search_and_open_address_card(self, code: str, address: str, client_name: str) -> None:
