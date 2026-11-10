@@ -42,7 +42,7 @@ import re
 import subprocess
 import sys
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 from config import Config, load_config
 
