@@ -336,16 +336,23 @@ class AdvantumService:
         time.sleep(1.5)
 
         # Ожидаем появления таблицы 'Точки доставки'
-        points_table = self.wait.until(
+        self.wait.until(
             EC.presence_of_element_located(
-                (By.XPATH, "//div[contains(., 'Точки доставки')]//div[@role='grid' or contains(@class, 'extended-grid')]")
+                (By.XPATH, "//*[contains(text(), 'Точки доставки')]")
             )
         )
 
+        # Берем строки строго из панели 'Точки доставки' (исключая 'Рейсы' и 'Инциденты')
         rows = self.driver.find_elements(
             By.XPATH,
-            "//div[contains(., 'Точки доставки')]//div[@role='row'][not(contains(@class, 'header')) and not(contains(@class, 'head'))]"
+            "//*[contains(text(), 'Точки доставки')]/ancestor::div[not(contains(., 'Инциденты'))][last()]"
+            "//div[@role='row'][not(contains(@class, 'header')) and not(contains(@class, 'head')) and not(.//*[@role='columnheader'])]"
         )
+        if not rows:
+            rows = self.driver.find_elements(
+                By.XPATH,
+                "//div[contains(., 'Точки доставки')]//div[@role='row'][not(contains(@class, 'header')) and not(contains(@class, 'head'))]"
+            )
 
         parsed_points = []
         for r in rows:
@@ -707,13 +714,32 @@ class AdvantumService:
         except Exception as e:
             logger.warning("Не удалось открыть вкладку Яндекс Карт: %s", e)
 
-    def recalculate_telematics(self) -> bool:
+    def recalculate_telematics(self, trip_number: str = "") -> bool:
         """
         Нажимает кнопку 'Пересчитать телематику' на панели инструментов рейса
         и подтверждает действие в модальном окне.
         """
         print("[Advantum] Запуск пересчета телематики...")
+        if hasattr(self.driver, "bring_window_to_front"):
+            self.driver.bring_window_to_front()
         wait_overlays_gone(self.driver, timeout=6)
+        time.sleep(1.0)
+
+        # Проверяем, что строка рейса выбрана (плашка 'Выбрано 1' и активная панель инструментов)
+        if trip_number:
+            try:
+                selected_badge = self.driver.find_elements(
+                    By.XPATH, "//*[contains(text(), 'Выбрано')]"
+                )
+                if not selected_badge:
+                    row_xpath = f"//div[@role='row' and contains(., '{trip_number}')]"
+                    row_elems = self.driver.find_elements(By.XPATH, row_xpath)
+                    if row_elems:
+                        self.driver.execute_script("arguments[0].click();", row_elems[0])
+                        time.sleep(1.5)
+                        print(f"[Advantum] Повторно выбрана строка рейса {trip_number}.")
+            except Exception:
+                pass
 
         # 1. Поиск кнопки с тултипом 'Пересчитать телематику'
         recalc_btn_xpath = (
@@ -724,8 +750,11 @@ class AdvantumService:
 
         try:
             recalc_btn = self.wait.until(EC.element_to_be_clickable((By.XPATH, recalc_btn_xpath)))
-            self.driver.execute_script("arguments[0].click();", recalc_btn)
-            time.sleep(1.5)
+            try:
+                recalc_btn.click()
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", recalc_btn)
+            time.sleep(1.2)
             print("[Advantum] Нажата кнопка 'Пересчитать телематику'.")
         except Exception as e:
             logger.error("Кнопка 'Пересчитать телематику' не найдена: %s", e)
@@ -735,14 +764,25 @@ class AdvantumService:
         try:
             confirm_modal = self.wait.until(
                 EC.presence_of_element_located(
-                    (By.XPATH, "//div[@role='dialog' or contains(@class, 'MuiDialog-paper')]")
+                    (
+                        By.XPATH,
+                        "//div[@role='dialog' or contains(@class, 'MuiDialog-paper')][contains(., 'Пересчитать телематику')]"
+                        " | //div[@role='dialog' or contains(@class, 'MuiDialog-paper')]",
+                    )
                 )
             )
+            print("[Advantum] Открыто модальное окно 'Пересчитать телематику?'.")
+            time.sleep(1.0)  # Пауза, чтобы окно подтверждения было хорошо видно на экране
+
             yes_btn = confirm_modal.find_element(
                 By.XPATH, ".//button[normalize-space(text())='Да']"
             )
-            self.driver.execute_script("arguments[0].click();", yes_btn)
-            time.sleep(2)
+            try:
+                yes_btn.click()
+            except Exception:
+                self.driver.execute_script("arguments[0].click();", yes_btn)
+
+            time.sleep(2.0)
             wait_overlays_gone(self.driver, timeout=10)
             print("[Advantum] Подтверждение пересчета телематики ('Да') успешно отправлено!")
             return True

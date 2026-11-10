@@ -649,14 +649,78 @@ class DirectCDPDriver:
         self._ws = _CDPWebSocket(target_info["webSocketDebuggerUrl"])
         self._current_target_id = target_id
         self._current_frame_object_id = None
+        try:
+            self.execute_cdp_cmd("Target.activateTarget", {"targetId": target_id})
+        except Exception:
+            pass
         self.execute_cdp_cmd("Page.enable", {})
         self.execute_cdp_cmd("Runtime.enable", {})
         self.execute_cdp_cmd("DOM.enable", {})
+        try:
+            self.execute_cdp_cmd("Page.bringToFront", {})
+        except Exception:
+            pass
         if self.disable_js:
             try:
                 self.execute_cdp_cmd(
                     "Emulation.setScriptExecutionDisabled", {"value": True}
                 )
+            except Exception:
+                pass
+
+    def bring_window_to_front(self) -> None:
+        """
+        Выводит окно браузера на передний план экрана Windows (поверх 1С и других окон)
+        и активирует текущую вкладку CDP.
+        """
+        try:
+            if self._current_target_id:
+                self.execute_cdp_cmd("Target.activateTarget", {"targetId": self._current_target_id})
+            self.execute_cdp_cmd("Page.bringToFront", {})
+        except Exception:
+            pass
+
+        if sys.platform == "win32":
+            try:
+                import win32con
+                import win32gui
+
+                primary_hwnds: list[int] = []
+                fallback_hwnds: list[int] = []
+
+                def _enum_cb(hwnd: int, _) -> None:
+                    if not win32gui.IsWindowVisible(hwnd):
+                        return
+                    title = (win32gui.GetWindowText(hwnd) or "").lower()
+                    if any(k in title for k in ("advantum", "atms")):
+                        primary_hwnds.append(hwnd)
+                    elif any(k in title for k in ("яндекс", "yandex", "chrome", "браузер")):
+                        fallback_hwnds.append(hwnd)
+
+                win32gui.EnumWindows(_enum_cb, None)
+                target_hwnds = primary_hwnds or fallback_hwnds
+                for hwnd in target_hwnds[:1]:
+                    if win32gui.IsIconic(hwnd):
+                        win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                    else:
+                        win32gui.ShowWindow(hwnd, win32con.SW_SHOW)
+                    # Выводим окно поверх полноэкранной 1С через TOPMOST -> NOTOPMOST
+                    win32gui.SetWindowPos(
+                        hwnd,
+                        win32con.HWND_TOPMOST,
+                        0, 0, 0, 0,
+                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+                    )
+                    win32gui.SetWindowPos(
+                        hwnd,
+                        win32con.HWND_NOTOPMOST,
+                        0, 0, 0, 0,
+                        win32con.SWP_NOMOVE | win32con.SWP_NOSIZE | win32con.SWP_SHOWWINDOW,
+                    )
+                    try:
+                        win32gui.SetForegroundWindow(hwnd)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 

@@ -452,13 +452,11 @@ class WindowsOneCService(OneCServiceInterface):
           1. Копирует URL в буфер обмена.
           2. Нажимает Shift+F11 (в 1С открывается окно «Переход по ссылке», фокус сразу в поле «Ссылка:»).
           3. Вставляет URL (Ctrl+A -> Ctrl+V) и нажимает Enter (кнопка «Перейти» по умолчанию).
+        ВАЖНО: НЕ отправляет Escape перед Shift+F11, так как в 1С:Предприятие 8.3 нажатие Esc
+        в обычной форме закрывает текущий открытый у пользователя раздел (вкладку)!
         """
         print(f"\n[1С:Windows] Переход в раздел «{section_title}» по прямой ссылке (Shift+F11)...")
         print(f"             URL: {url}")
-
-        # Если вдруг остался открытым какой-то модальный диалог (например, «Найти») — закрываем его
-        self._hotkey_esc()
-        time.sleep(0.25)
 
         set_clipboard(url)
         time.sleep(0.1)
@@ -943,12 +941,21 @@ class WindowsOneCService(OneCServiceInterface):
 
     def _save_and_close_card(self) -> None:
         """
-        Нажимает желтую кнопку «Записать и закрыть» (на 1920x1080: x=250, y=133).
+        Нажимает желтую кнопку «Записать и закрыть» (на 1920x1080: x=250, y=133)
+        и дожидается фактического закрытия карточки в 1С (пока в карточке сохраняются изменения и она исчезает).
         """
         sx, sy = self._scale_xy(250, 133)
         print(f"[1С:Windows] Нажатие кнопки «Записать и закрыть» ({sx}, {sy})...")
         self.pywinauto.mouse.click(coords=(sx, sy))
-        self._wait_1c_ready(min_wait=2.5, max_wait=8.0)
+
+        # Ждем, пока карточка реально закроется (желтая кнопка «Записать и закрыть» исчезнет с экрана)
+        start_ts = time.time()
+        time.sleep(1.5)
+        while time.time() - start_ts < 20.0:
+            if not self._is_address_card_open() and not self._is_1c_list_search_busy():
+                break
+            time.sleep(0.4)
+        time.sleep(1.0)
 
     # ---------------------------------------------------------------------
     # Главный публичный метод обновления координат точки в 1С
@@ -998,7 +1005,7 @@ class WindowsOneCService(OneCServiceInterface):
                 "Проверьте, что карточка адреса доставки открылась."
             )
 
-        # 7. При необходимости обновляем радиус зоны
+        # 7. При необходимости обновляем радиус зоны (если передан --radius)
         if radius is not None:
             print(f"[1С:Windows] Ввод радиуса зоны: {radius} м...")
             self._fill_field_by_label("радиус", str(radius))

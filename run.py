@@ -202,6 +202,8 @@ def main():
             try:
                 # Переключаемся обратно на основную вкладку с таблицей рейсов (без закрытия вкладок)
                 driver.switch_to.window(main_handle)
+                if hasattr(driver, "bring_window_to_front"):
+                    driver.bring_window_to_front()
                 time.sleep(1.5)
 
                 # Если открыта страница трека /map — возвращаемся к таблице рейсов
@@ -216,7 +218,7 @@ def main():
                 logger.debug("Возврат к таблице рейсов: %s", e)
 
             time.sleep(1.5)
-            recalc_ok = advantum.recalculate_telematics()
+            recalc_ok = advantum.recalculate_telematics(trip_number=args.trip)
             if recalc_ok:
                 print(" [Advantum] ✓ Пересчет телематики успешно запрошен!")
             else:
