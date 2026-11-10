@@ -510,6 +510,126 @@ class WindowsOneCService(OneCServiceInterface):
         except Exception:
             return None
 
+    def _capture_first_row_signature(self) -> list:
+        """
+        Снимает быстрый пиксельный отпечаток текста первой строки таблицы «Адреса доставки»
+        (колонки «Код» и «Наименование» на y=264..271, x=290..380) за ~5 мс.
+        Позволяет определить момент, когда после нажатия Enter в поиске 1С реально обновила таблицу.
+        """
+        sig = []
+        sample_points = (
+            (292, 265), (295, 267), (299, 268), (301, 270),
+            (305, 266), (308, 268), (312, 267), (316, 265),
+            (325, 267), (335, 267), (350, 267), (450, 267),
+            (250, 297), (280, 300), (400, 300),
+        )
+        for px, py in sample_points:
+            sx, sy = self._scale_xy(px, py)
+            sig.append(self._get_pixel_rgb(sx, sy))
+        return sig
+
+    def _is_1c_list_search_busy(self) -> bool:
+        """
+        Определяет, выполняется ли прямо сейчас в 1С фоновый поиск («Поиск...» со спиннером):
+        Во время поиска в 1С:Предприятие 8.3 (см. эталонный кадр f_70s.png):
+          1. Поверх левой части таблицы всплывает белое окно «Поиск...» с рамкой (x=229..386, y=274..349),
+             а выделение первой строки (x=350..600, y=266..268) бледнеет:
+             вместо ярко-желтого RGB=(249, 231, 144) (B ≈ 144..150) оно становится бледно-кремовым
+             RGB=(249, 243, 200) (B >= 185).
+          2. Или окно 1С временно не отвечает (IsHungAppWindow).
+        Возвращает True, пока поиск еще идет (таблица бледная / висит спиннер «Поиск...»),
+        и False, когда поиск завершился и первая строка снова активно выделена ярко-желтым цветом.
+        """
+        try:
+            if self.main_win and self.ctypes.windll.user32.IsHungAppWindow(self.main_win.handle):
+                return True
+        except Exception:
+            pass
+
+        # Проверяем цвет выделения первой строки в точках (350, 267), (450, 267), (600, 267)
+        # В готовом состоянии (f_65s.png, f_80s.png): R >= 235, G >= 215, B <= 170 (ярко-желтая строка)
+        # Во время «Поиск...» (f_70s.png): B поднимается до 195..225 (бледно-кремовая/белая строка)
+        dimmed_count = 0
+        valid_reads = 0
+        for px in (350, 450, 600):
+            sx, sy = self._scale_xy(px, 267)
+            rgb = self._get_pixel_rgb(sx, sy)
+            if rgb is not None:
+                valid_reads += 1
+                r, g, b = rgb
+                # Если синий канал B > 180 (или пиксель вообще не желтый), значит строка приглушена спиннером «Поиск...»
+                if b > 180 or r < 220 or g < 200:
+                    dimmed_count += 1
+
+        if valid_reads > 0 and dimmed_count == valid_reads:
+            return True
+
+        return False
+
+    def _wait_1c_search_results(
+        self,
+        before_sig: Optional[list] = None,
+        min_wait: float = 6.0,
+        max_wait: float = 35.0,
+    ) -> None:
+        """
+        Надежное ожидание завершения поиска в списке «Адреса доставки» 1С:
+          1. Ждет начальную фазу запуска поиска и отслеживает появление спиннера «Поиск...»
+             или изменение текста первой строки относительно before_sig.
+          2. Пока в 1С висит плашка «Поиск...» (первая строка бледная, _is_1c_list_search_busy() == True),
+             продолжает ждать вплоть до max_wait секунд.
+          3. После исчезновения «Поиск...» и восстановления ярко-желтого выделения первой строки
+             ждет еще 1.2 сек стабильности, чтобы таблица 1С гарантированно завершила отрисовку.
+        """
+        start_ts = time.time()
+        saw_busy_or_changed = False
+
+        # Даем 1С 0.8 сек после нажатия Enter, чтобы спиннер «Поиск...» успел появиться
+        time.sleep(0.8)
+
+        stable_ready_since: Optional[float] = None
+
+        while True:
+            elapsed = time.time() - start_ts
+            busy = self._is_1c_list_search_busy()
+
+            if busy:
+                saw_busy_or_changed = True
+                stable_ready_since = None
+            else:
+                if before_sig is not None and not saw_busy_or_changed:
+                    cur_sig = self._capture_first_row_signature()
+                    diff_pts = sum(
+                        1
+                        for a, b in zip(before_sig, cur_sig)
+                        if a is not None
+                        and b is not None
+                        and (abs(a[0] - b[0]) > 25 or abs(a[1] - b[1]) > 25 or abs(a[2] - b[2]) > 25)
+                    )
+                    if diff_pts >= 2:
+                        saw_busy_or_changed = True
+
+                if stable_ready_since is None:
+                    stable_ready_since = time.time()
+
+            # Выходим, когда:
+            # - прошло не менее min_wait секунд, И
+            # - поиск уже не активен (не busy) минимум 1.2 секунды подряд, И
+            # - либо мы зафиксировали спиннер/смену строки, либо прошло уже >= 11 секунд
+            if not busy and stable_ready_since is not None:
+                stable_for = time.time() - stable_ready_since
+                if elapsed >= min_wait and stable_for >= 1.2 and (saw_busy_or_changed or elapsed >= 11.0):
+                    break
+
+            if elapsed >= max_wait:
+                print(f"[1С:Windows] ⚠ Достигнут лимит ожидания поиска ({max_wait:.0f} сек), продолжаем...")
+                break
+
+            time.sleep(0.35)
+
+        total_wait = time.time() - start_ts
+        print(f"[1С:Windows] ✓ Поиск в 1С завершен (ожидание составило {total_wait:.1f} сек).")
+
     # ---------------------------------------------------------------------
     # Шаг 3: Установка фильтра Организация = ООО "ФК ПУЛЬС" (Расширенный поиск)
     # ---------------------------------------------------------------------
@@ -608,8 +728,8 @@ class WindowsOneCService(OneCServiceInterface):
         self.pywinauto.mouse.click(coords=(find_btn_x, find_btn_y))
         time.sleep(0.3)
 
-        # Дожидаемся полной загрузки отфильтрованного списка (на видео фильтрация занимает ~3.5-4.5 секунды)
-        self._wait_1c_ready(min_wait=4.5, max_wait=14.0)
+        # Дожидаемся полной загрузки отфильтрованного списка (контроль спиннера «Поиск...» и желтого выделения первой строки)
+        self._wait_1c_search_results(before_sig=None, min_wait=5.0, max_wait=25.0)
         print(f"[1С:Windows] ✓ Фильтр «{field_name}: {org_value}» установлен и загружен.")
 
     # ---------------------------------------------------------------------
@@ -618,12 +738,16 @@ class WindowsOneCService(OneCServiceInterface):
     def _focus_and_paste_in_search_box(self, query: str) -> None:
         """
         Вставляет номер точки в поле «Поиск (Ctrl+F)» на командной панели «Адреса доставки»,
-        нажимает Enter и дожидается полной загрузки результатов поиска.
+        нажимает Enter и дожидается полной загрузки результатов поиска (пока исчезнет спиннер «Поиск...»
+        и обновится первая строка таблицы).
 
         Точные координаты на 1920x1080 (проверено по s_080.png и f_52s.png):
           • Поле «Поиск (Ctrl+F)»: left=1474..1719, top=118..142 (центр: x=1600, y=130)
         """
         print(f"[1С:Windows] Поиск номера точки в списке: '{query}'...")
+
+        # Снимаем отпечаток текущей первой строки таблицы ДО запуска поиска
+        before_sig = self._capture_first_row_signature()
 
         search_x, search_y = self._scale_xy(1600, 130)
 
@@ -637,9 +761,9 @@ class WindowsOneCService(OneCServiceInterface):
         time.sleep(0.35)
         self._hotkey_enter()
 
-        # 3. Ожидаем завершения загрузки поиска (пока прогрузится спиннер «Поиск...»)
-        print(f"[1С:Windows] Ожидание загрузки результатов поиска для '{query}'...")
-        self._wait_1c_ready(min_wait=3.5, max_wait=10.0)
+        # 3. Ожидаем полного завершения поиска в 1С (пока пропадет плашка «Поиск...» и обновится строка)
+        print(f"[1С:Windows] Ожидание завершения поиска в 1С для '{query}'...")
+        self._wait_1c_search_results(before_sig=before_sig, min_wait=6.5, max_wait=35.0)
 
     def _is_address_card_open(self) -> bool:
         """
@@ -668,7 +792,7 @@ class WindowsOneCService(OneCServiceInterface):
             return True
 
         code_expected_low = expected_code.strip().lower()
-        code_field_x, code_field_y = self._scale_xy(1830, 170)
+        code_field_x, code_field_y = self._scale_xy(1630, 170)
 
         try:
             set_clipboard("")
@@ -690,8 +814,7 @@ class WindowsOneCService(OneCServiceInterface):
                 print(f"[1С:Windows] ✓ Проверка безопасности: код точки '{copied_code}' в карточке совпадает с '{expected_code}'.")
                 return True
 
-            other_codes = re.findall(r"\b(?:мск|брн|влг|спб|екб|нск|кзн|рнд|смр|вшн|тул|ирк|орл|клг)\d{4,12}\b", copied_low)
-            if other_codes and code_expected_low not in other_codes:
+            if copied_low != code_expected_low:
                 print(
                     f"[1С:Windows] ⚠ ЗАЩИТА: Открылась чужая карточка (Код в карточке: '{copied_code}' "
                     f"вместо '{expected_code}')! Закрываем карточку без изменений..."
