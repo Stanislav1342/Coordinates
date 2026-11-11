@@ -232,25 +232,33 @@ def main():
                 print(f" [Данные] Точек всего: {shipment_audit.total_points} | Отбиты: {shipment_audit.ok_count} | Опоздания: {shipment_audit.near_count} | НЕ ПРОЙДЕНЫ: {shipment_audit.fail_count}")
                 print(f" [Данные] GPS-трек:    {shipment_audit.gps_points_count} отметок положения автомобиля")
 
-                # Выводим в лог детали по всем проблемным точкам
-                non_ok_points = [p for p in shipment_audit.points if p.status_raw != "OK"]
-                if not non_ok_points:
-                    print(f" [Итог] Все точки рейса №{trip_num} успешно пройдены вовремя!")
+                # Выводим в лог детали по всем проблемным точкам и точкам со смещением координат
+                points_to_show = [
+                    p for p in shipment_audit.points
+                    if p.status_raw != "OK" or p.is_false_late or (p.dist_adv_to_geo is not None and p.dist_adv_to_geo >= 30)
+                ]
+                if not points_to_show:
+                    print(f" [Итог] Все точки рейса №{trip_num} успешно пройдены вовремя, координаты точные!")
                 else:
-                    for p in non_ok_points:
+                    for p in points_to_show:
                         print("\n" + "-" * 78)
                         print(f" ТОЧКА №{p.index} [{p.code or 'нет кода'}]: {p.name}")
-                        print(f"   Адрес:     {p.address}")
-                        print(f"   Статус:    {p.status_title}")
+                        print(f"   Адрес:            {p.address}")
+                        print(f"   Статус в ЕИС:     {p.status_title}")
+                        print(f"   План доставки:    {p.plan_start} — {p.plan_finish} (МСК)")
+                        print(f"   Факт телематики:  {p.fact_start} — {p.fact_finish} (МСК) (Стоянка: {p.time_on_point})")
                         if p.adv_lat and p.adv_lon:
                             print(f"   Координаты ЕИС:   {p.adv_lat:.8f}, {p.adv_lon:.8f}")
                         if p.geo_lat and p.geo_lon:
-                            print(f"   Яндекс Карты:     {p.geo_lat:.8f}, {p.geo_lon:.8f} (смещение: {p.dist_adv_to_geo:.1f} м)")
-                        if p.min_dist_to_geo is not None:
-                            print(f"   Мин. сближение:   {p.min_dist_to_geo:.1f} м ({p.closest_time_geo or '—'})")
-                        print(f"   ВЕРДИКТ:   {p.verdict}")
-                        print(f"   ПРИЧИНА:   {p.reason}")
-                        print(f"   ДЕЙСТВИЕ:  {p.recommended_action}")
+                            shift_info = f" (смещение: {p.dist_adv_to_geo:.1f} м)" if p.dist_adv_to_geo is not None else ""
+                            print(f"   Яндекс Карты:     {p.geo_lat:.8f}, {p.geo_lon:.8f}{shift_info}")
+                        if p.is_false_late and p.actual_visit_in_window:
+                            print(f"   ФАКТИЧ. ВЫГРУЗКА: {p.actual_visit_in_window} — В ПЛАНОВОМ ОКНЕ")
+                        elif p.min_dist_to_geo is not None:
+                            print(f"   Мин. сближение:   {p.min_dist_to_geo:.1f} м (время отметки: {p.closest_time_geo or '—'} МСК)")
+                        print(f"   ВЕРДИКТ:          {p.verdict}")
+                        print(f"   ПРИЧИНА:          {p.reason}")
+                        print(f"   ДЕЙСТВИЕ:         {p.recommended_action}")
 
             except Exception as e:
                 logger.error("Ошибка при аудите рейса №%s: %s", trip_num, e)
