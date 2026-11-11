@@ -46,7 +46,7 @@ from audit_service import (
 )
 from browser import create_driver, login_to_advantum
 from config import load_config
-from gui import parse_trips_input, show_batch_input_dialog
+from gui import parse_trips_input, prompt_trips_cli, show_batch_input_dialog
 from onec_service import get_onec_service
 from yandex_service import YandexGeocoder
 from utils import wait_overlays_gone
@@ -77,6 +77,11 @@ def main():
         nargs="*",
         default=None,
         help="Один или несколько номеров рейсов (например, --trip 15181951 15181921 или --trip 15181951,15181921)",
+    )
+    parser.add_argument(
+        "--cli",
+        action="store_true",
+        help="Запросить номера рейсов прямо в терминале (без графического окна)",
     )
     parser.add_argument(
         "--gui",
@@ -133,7 +138,19 @@ def main():
     no_recalc: bool = args.no_recalc
     dry_run: bool = True  # По умолчанию безопасный режим аудита
 
-    if args.gui or not args.trip:
+    if args.cli:
+        gui_res = prompt_trips_cli()
+        if not gui_res:
+            return
+        trips = gui_res["trips"]
+        d_from = gui_res["date_from"]
+        d_to = gui_res["date_to"]
+        date_from = d_from.date() if isinstance(d_from, datetime.datetime) else d_from
+        date_to = d_to.date() if isinstance(d_to, datetime.datetime) else d_to
+        radius = gui_res["radius"]
+        dry_run = gui_res["dry_run"]
+        no_recalc = gui_res["no_recalc"]
+    elif args.gui or not args.trip:
         initial_trips = args.trip if args.trip else None
         gui_res = show_batch_input_dialog(
             default_trips=initial_trips,
