@@ -20,7 +20,7 @@ import logging
 import math
 import os
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from yandex_service import YandexGeocoder, haversine_distance
@@ -194,9 +194,8 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
         var points = ptsResp.ok ? await ptsResp.json() : [];
         
         // 3. Определение реальной даты выполнения рейса (date/factStartTime/firstPointStartTime)
-        var track = [];
         var actualDate = '';
-        if (shipment && shipment.vehicleId) {{
+        if (shipment) {{
             actualDate = shipment.date || 
                          (shipment.factStartTime ? shipment.factStartTime.substring(0, 10) : '') ||
                          (shipment.firstPointStartTime ? shipment.firstPointStartTime.substring(0, 10) : '') ||
@@ -207,16 +206,44 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
                 var now = new Date();
                 actualDate = now.toISOString().substring(0, 10);
             }}
-            
-            var trackUrl = '/api/v1/vehicleLocations?vehicleId=' + shipment.vehicleId + 
-                           '&from=' + actualDate + 'T00:00:00Z&to=' + actualDate + 'T23:59:59Z';
-            var trackResp = await fetch(trackUrl, {{ headers: headers }});
-            if (trackResp.ok) {{
-                track = await trackResp.json();
+        }}
+        
+        // 4. Запрос GPS-трека (проверяем тягач, а при отсутствии отметок — полуприцеп!)
+        var vehicleIdsToTry = [];
+        if (shipment) {{
+            if (shipment.vehicleId) vehicleIdsToTry.push(shipment.vehicleId);
+            if (shipment.trailerId && !vehicleIdsToTry.includes(shipment.trailerId)) {{
+                vehicleIdsToTry.push(shipment.trailerId);
+            }}
+            if (Array.isArray(shipment.vehicleIds)) {{
+                for (var vid of shipment.vehicleIds) {{
+                    if (!vehicleIdsToTry.includes(vid)) vehicleIdsToTry.push(vid);
+                }}
+            }}
+            if (Array.isArray(shipment.trailerIds)) {{
+                for (var tid of shipment.trailerIds) {{
+                    if (!vehicleIdsToTry.includes(tid)) vehicleIdsToTry.push(tid);
+                }}
             }}
         }}
         
-        return {{ shipment: shipment, points: points, track: track, actualDate: actualDate }};
+        var track = [];
+        var usedTrackId = '';
+        for (var vid of vehicleIdsToTry) {{
+            var trackUrl = '/api/v1/vehicleLocations?vehicleId=' + vid + 
+                           '&from=' + actualDate + 'T00:00:00Z&to=' + actualDate + 'T23:59:59Z';
+            var trackResp = await fetch(trackUrl, {{ headers: headers }});
+            if (trackResp.ok) {{
+                var pts = await trackResp.json();
+                if (Array.isArray(pts) && pts.length > 0) {{
+                    track = pts;
+                    usedTrackId = String(vid);
+                    break;
+                }}
+            }}
+        }}
+        
+        return {{ shipment: shipment, points: points, track: track, actualDate: actualDate, usedTrackId: usedTrackId }};
     }})();
     """
     data = driver.execute_script(fetch_js)
@@ -356,8 +383,22 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
         p_audit.closest_time_adv = closest_time_adv
 
         # 3.2. Поиск ближайшей реальной стоянки водителя (speed < 5 км/ч, duration >= 2 мин)
+        plan_t0 = None
+        plan_t1 = None
+        if plan_start:
+            try:
+                plan_t0 = datetime.fromisoformat(plan_start.replace("Z", "+00:00"))
+            except Exception:
+                pass
+        if plan_finish:
+            try:
+                plan_t1 = datetime.fromisoformat(plan_finish.replace("Z", "+00:00"))
+            except Exception:
+                pass
+
         best_stop = None
         min_stop_dist = 999999.0
+        best_stop_is_window_match = False
         target_ref_lat = p_audit.geo_lat or adv_lat
         target_ref_lon = p_audit.geo_lon or adv_lon
 
@@ -368,11 +409,30 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
                     ds_adv = haversine_distance(s["lat"], s["lon"], adv_lat, adv_lon)
                     ds = min(ds, ds_adv)
 
-                if ds < min_stop_dist:
+                # Проверяем совпадение стоянки с плановым временным окном доставки
+                is_window_match = False
+                try:
+                    s_t0 = datetime.fromisoformat(s["start"].replace("Z", "+00:00"))
+                    s_t1 = datetime.fromisoformat(s["end"].replace("Z", "+00:00"))
+                    if plan_t0 and plan_t1:
+                        w_start = plan_t0 - timedelta(minutes=60)
+                        w_end = plan_t1 + timedelta(minutes=60)
+                        if not (s_t1 < w_start or s_t0 > w_end):
+                            is_window_match = True
+                except Exception:
+                    pass
+
+                # Стоянка в плановое окно имеет приоритет в радиусе до 3500 м
+                if is_window_match and ds <= 3500:
+                    if not best_stop_is_window_match or ds < min_stop_dist:
+                        min_stop_dist = ds
+                        best_stop = s
+                        best_stop_is_window_match = True
+                elif not best_stop_is_window_match and ds < min_stop_dist:
                     min_stop_dist = ds
                     best_stop = s
 
-        if best_stop and min_stop_dist <= 1500:
+        if best_stop and min_stop_dist <= 3500:
             p_audit.detected_stop_lat = best_stop["lat"]
             p_audit.detected_stop_lon = best_stop["lon"]
             p_audit.detected_stop_duration = best_stop["duration_min"]
@@ -382,19 +442,20 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
         # -------------------------------------------------------------
         # ОПРЕДЕЛЕНИЕ ТОЧНОЙ ПРИЧИНЫ НЕОТБИТОЙ ТОЧКИ
         # -------------------------------------------------------------
-        # Сценарий 1: Водитель выполнил реальную стоянку на складе неподалеку (350–1500 м)
-        # При этом адрес в ЕИС не совпадает со складом (например, Островцы, Содружество склад)
-        if p_audit.detected_stop_dist is not None and 350 < p_audit.detected_stop_dist <= 1500:
+        # Сценарий 1: Водитель выполнил реальную стоянку на складе неподалеку (350–3500 м)
+        # При этом адрес в ЕИС не совпадает со складом (например, Островцы / Тарасовка)
+        if p_audit.detected_stop_dist is not None and 350 < p_audit.detected_stop_dist <= 3500:
+            window_info = f" в плановое время доставки ({p_audit.detected_stop_time})" if best_stop_is_window_match else f" (время {p_audit.detected_stop_time})"
             p_audit.verdict = "⚠ ОШИБКА АДРЕСА В ЕИС (ЗАЕЗД НА ФАКТИЧЕСКИЙ СКЛАД КЛИЕНТА)"
             p_audit.reason = (
-                f"В базе ЕИС указан адрес '{address}', но водитель выполнил реальную стоянку "
-                f"({p_audit.detected_stop_duration} мин в {p_audit.detected_stop_time}) на удалении {p_audit.detected_stop_dist:.0f} м "
+                f"В базе ЕИС указан неверный адрес: '{address}' (удаление {p_audit.detected_stop_dist:.0f} м). "
+                f"Однако водитель выполнил реальную погрузку/стоянку длительностью {p_audit.detected_stop_duration} мин{window_info} "
                 f"по координатам {p_audit.detected_stop_lat:.8f}, {p_audit.detected_stop_lon:.8f}. "
-                f"По данным карт здесь находится фактический склад клиента. Точка не отбилась из-за некорректного адреса в ЕИС."
+                f"По данным карт здесь находится фактический склад клиента. Точка не отбилась из-за неверного адреса/координат в ЕИС."
             )
             p_audit.recommended_action = (
                 f"РЕКОМЕНДАЦИЯ: Обновить координаты в 1С на фактическую стоянку/склад: "
-                f"Широта={p_audit.detected_stop_lat:.8f}, Долгота={p_audit.detected_stop_lon:.8f} (проверить адрес с клиентом)."
+                f"Широта={p_audit.detected_stop_lat:.8f}, Долгота={p_audit.detected_stop_lon:.8f} (уточнить текстовый адрес с клиентом)."
             )
             p_audit.geo_lat = p_audit.detected_stop_lat
             p_audit.geo_lon = p_audit.detected_stop_lon

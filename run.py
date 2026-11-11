@@ -283,12 +283,10 @@ def main():
                     except Exception as e:
                         logger.warning("Не удалось запустить пересчет в Advantum: %s", e)
 
-        # 7. Генерация и сохранение полного экспертного отчета
+        # 7. Генерация и вывод экспертного отчета в терминал
         if audits:
             report_text = generate_audit_report_text(audits)
             print("\n\n" + report_text + "\n")
-            report_file = save_audit_report_to_file(report_text)
-            print(f"[Успех] Полный текстовый отчет сохранен в файл: {report_file}")
         else:
             print("\n[Внимание] Данные аудита отсутствуют (рейсы не найдены).")
 

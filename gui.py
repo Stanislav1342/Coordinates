@@ -119,12 +119,41 @@ def show_batch_input_dialog(
     trips_frame = ttk.LabelFrame(main_frame, text=" Номера рейсов ", padding="8 8 8 8")
     trips_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
+    trips_header = ttk.Frame(trips_frame)
+    trips_header.pack(fill=tk.X, pady=(0, 4))
+
     trips_hint = ttk.Label(
-        trips_frame,
-        text="Введите один или несколько номеров (через запятую, пробел или с новой строки):",
+        trips_header,
+        text="Введите номера рейсов (через запятую, пробел или с новой строки):",
         font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 9),
     )
-    trips_hint.pack(anchor="w", pady=(0, 4))
+    trips_hint.pack(side=tk.LEFT, anchor="w")
+
+    def handle_paste(event=None):
+        try:
+            clipboard_content = root.clipboard_get()
+            try:
+                trips_text.delete(tk.SEL_FIRST, tk.SEL_LAST)
+            except tk.TclError:
+                pass
+            trips_text.insert(tk.INSERT, clipboard_content)
+        except Exception:
+            pass
+        return "break"
+
+    def handle_select_all(event=None):
+        trips_text.tag_add(tk.SEL, "1.0", tk.END)
+        trips_text.mark_set(tk.INSERT, "1.0")
+        trips_text.see(tk.INSERT)
+        return "break"
+
+    btn_paste = ttk.Button(
+        trips_header,
+        text="📋 Вставить из буфера",
+        command=handle_paste,
+        width=20,
+    )
+    btn_paste.pack(side=tk.RIGHT)
 
     trips_text = tk.Text(
         trips_frame,
@@ -135,6 +164,43 @@ def show_batch_input_dialog(
         borderwidth=1,
     )
     trips_text.pack(fill=tk.BOTH, expand=True)
+
+    # Привязки горячих клавиш (включая русскую раскладку клавиатуры на Windows!)
+    trips_text.bind("<Control-v>", handle_paste)
+    trips_text.bind("<Control-V>", handle_paste)
+    trips_text.bind("<Control-KeyPress-m>", handle_paste)
+    trips_text.bind("<Control-KeyPress-M>", handle_paste)
+    trips_text.bind("<Control-KeyPress-Cyrillic_em>", handle_paste)
+    trips_text.bind("<Control-KeyPress-Cyrillic_EM>", handle_paste)
+    trips_text.bind("<Shift-Insert>", handle_paste)
+    trips_text.bind("<<Paste>>", handle_paste)
+
+    trips_text.bind("<Control-a>", handle_select_all)
+    trips_text.bind("<Control-A>", handle_select_all)
+    trips_text.bind("<Control-KeyPress-f>", handle_select_all)
+    trips_text.bind("<Control-KeyPress-F>", handle_select_all)
+    trips_text.bind("<Control-KeyPress-Cyrillic_ef>", handle_select_all)
+    trips_text.bind("<Control-KeyPress-Cyrillic_EF>", handle_select_all)
+
+    # Контекстное меню по правому клику мыши
+    menu = tk.Menu(trips_text, tearoff=0)
+    menu.add_command(label="Вставить", command=handle_paste)
+    menu.add_command(label="Копировать", command=lambda: trips_text.event_generate("<<Copy>>"))
+    menu.add_command(label="Вырезать", command=lambda: trips_text.event_generate("<<Cut>>"))
+    menu.add_separator()
+    menu.add_command(label="Выделить всё", command=handle_select_all)
+    menu.add_command(label="Очистить", command=lambda: trips_text.delete("1.0", tk.END))
+
+    def show_context_menu(event):
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    trips_text.bind("<Button-3>", show_context_menu)
+    if sys.platform == "darwin":
+        trips_text.bind("<Button-2>", show_context_menu)
+
     if initial_trips_str:
         trips_text.insert("1.0", initial_trips_str)
     trips_text.focus_set()
