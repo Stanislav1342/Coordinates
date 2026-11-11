@@ -1,5 +1,5 @@
 """
-run.py — Главный запускаемый скрипт синхронизации Advantum и 1С:Предприятие.
+run.py — Главный запускаемый скрипт аудита и диагностики рейсов Advantum и синхронизации с 1С.
 
 Поддерживает:
 1. Графическое окно ввода (GUI) для пакетной обработки нескольких рейсов:
@@ -7,16 +7,26 @@ run.py — Главный запускаемый скрипт синхрониз
    или принудительно:
      python run.py --gui
 
-2. Пакетный или одиночный запуск через командную строку:
-     python run.py --trip 15053328 15053329 --date-from 20.10.2026 --date-to 30.10.2026
-     python run.py --trip 15053328,15053329
+2. Пакетный запуск через командную строку:
+     python run.py --trip 15181951 15181921
+     python run.py --trip 15181951,15181921 --apply-1c
 
-Оптимизации скорости:
-- Фильтр дат в календаре Advantum выставляется ОДИН раз в самом начале.
-- Для каждого рейса скрипт только вводит его номер в поиск Advantum.
-- Раздел «Адреса доставки» в 1С открывается по прямой ссылке e1cib (Shift+F11) один раз.
-- Фильтр «Организация: ООО "ФК ПУЛЬС"» в 1С устанавливается ОДИН раз на первой точке;
-  для всех последующих точек и рейсов 1С сразу ищет номер точки (МСК...).
+Режимы работы:
+- [ПО УМОЛЧАНИЮ] Формат экспертного отчета (Audit & Diagnostics):
+  Скрипт проводит глубокий геометрический анализ через нативный API Advantum:
+  * Проверяет статус всех точек рейса (без пропусков из-за скролла таблиц).
+  * Сканирует полный GPS-трек автомобиля за день рейса (тысячи отметок).
+  * Определяет точную причину неотбитой точки:
+      - Водителя не было на объекте (дистанция > 1.2 км) -> 1С НЕ трогаем!
+      - Неправильные координаты в базе ЕИС (смещение > 200 м, водитель был у здания).
+      - Недостаточный радиус зоны (водитель подъезжал на 100-600 м, шлагбаум/парковка).
+      - Нарушение временного окна (опоздание водителя).
+      - Сбой телематики / РЭБ.
+  * Формирует подробный отчет в консоль и сохраняет в текстовый файл audit_report_*.txt.
+
+- [СИНХРОНИЗАЦИЯ С 1С] (--apply-1c):
+  Вносит изменения в 1С:Предприятие ИСКЛЮЧИТЕЛЬНО для точек, где доказана
+  ошибка координат в базе ЕИС (при фактическом заезде водителя к зданию).
 """
 
 import argparse
@@ -27,13 +37,19 @@ import time
 from typing import List, Optional
 
 from advantum_service import AdvantumService
+from audit_service import (
+    PointAudit,
+    ShipmentAudit,
+    audit_shipment,
+    generate_audit_report_text,
+    save_audit_report_to_file,
+)
 from browser import create_driver, login_to_advantum
 from config import load_config
 from gui import parse_trips_input, show_batch_input_dialog
 from onec_service import get_onec_service
-from yandex_service import YandexGeocoder, evaluate_coordinates
+from yandex_service import YandexGeocoder
 from utils import wait_overlays_gone
-from selenium.webdriver.common.by import By
 
 # Настройка логирования
 logging.basicConfig(
@@ -54,13 +70,13 @@ def parse_date(date_str: str) -> datetime.date:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Автоматическая проверка и корректировка координат рейсов (Advantum -> Яндекс Карты -> 1С)"
+        description="Интеллектуальный аудит неотбитых точек рейсов и диагностика причин (Advantum <-> 1С)"
     )
     parser.add_argument(
         "--trip",
         nargs="*",
         default=None,
-        help="Один или несколько номеров рейсов в Advantum (например, --trip 15053328 15053329 или --trip 15053328,15053329)",
+        help="Один или несколько номеров рейсов (например, --trip 15181951 15181921 или --trip 15181951,15181921)",
     )
     parser.add_argument(
         "--gui",
@@ -86,9 +102,15 @@ def main():
         help="Установить радиус зоны (м) в 1С при обновлении (например, 300)",
     )
     parser.add_argument(
+        "--apply-1c",
+        action="store_true",
+        help="Применить рекомендованные изменения в 1С (только для точек, где доказана ошибка координат ЕИС)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Только аудит: проверить точки и показать отклонения, без записи в 1С и пересчета",
+        default=None,
+        help="Принудительно включить режим только аудита и отчета без изменения 1С",
     )
     parser.add_argument(
         "--no-recalc",
@@ -108,11 +130,10 @@ def main():
     date_from: datetime.date = args.date_from
     date_to: datetime.date = args.date_to
     radius: Optional[int] = args.radius
-    dry_run: bool = args.dry_run
     no_recalc: bool = args.no_recalc
+    dry_run: bool = True  # По умолчанию безопасный режим аудита
 
     if args.gui or not args.trip:
-        # Если рейсы не переданы в командной строке или указан флаг --gui — открываем графическое окно
         initial_trips = args.trip if args.trip else None
         gui_res = show_batch_input_dialog(
             default_trips=initial_trips,
@@ -133,9 +154,12 @@ def main():
         dry_run = gui_res["dry_run"]
         no_recalc = gui_res["no_recalc"]
     else:
-        # Извлекаем рейсы из аргументов командной строки
         raw_trips_str = " ".join(args.trip)
         trips = parse_trips_input(raw_trips_str)
+        if args.apply_1c:
+            dry_run = False
+        if args.dry_run is not None:
+            dry_run = args.dry_run
 
     if not trips:
         print("\n[Ошибка] Не указано ни одного корректного номера рейса. Завершение работы.")
@@ -146,225 +170,135 @@ def main():
     if args.headless:
         config.headless = True
 
-    print("\n" + "=" * 76)
-    print(" АВТОМАТИЗАЦИЯ АУДИТА И КОРРЕКТИРОВКИ КООРДИНАТ (ADVANTUM <-> 1С)")
-    print("=" * 76)
-    print(f" Рейсов к обработке ({len(trips)}): {', '.join(trips[:8])}{' ...' if len(trips) > 8 else ''}")
-    print(f" Период в Advantum:       {date_from.strftime('%d.%m.%Y')} — {date_to.strftime('%d.%m.%Y')}")
-    print(f" Режим работы:            {'[ТОЛЬКО АУДИТ (Dry-run)]' if dry_run else '[ПОЛНАЯ СИНХРОНИЗАЦИЯ]'}")
+    print("\n" + "=" * 78)
+    print(" АВТОМАТИЗАЦИЯ АУДИТА И ДИАГНОСТИКИ РЕЙСОВ (ADVANTUM <-> 1С)")
+    print("=" * 78)
+    print(f" Рейсов к аудиту ({len(trips)}):  {', '.join(trips[:8])}{' ...' if len(trips) > 8 else ''}")
+    print(f" Режим работы:            {'[ТОЛЬКО АУДИТ И ОТЧЕТ (Безопасный)]' if dry_run else '[СИНХРОНИЗАЦИЯ С 1С (Внесение правок)]'}")
     if radius:
         print(f" Радиус зоны в 1С:        {radius} м")
     if no_recalc:
         print(f" Пересчет телематики:     Отключен (--no-recalc)")
-    print("=" * 76 + "\n")
+    print("=" * 78 + "\n")
 
     # 3. Инициализация сервисов
     geocoder = YandexGeocoder()
-    onec = get_onec_service(config)
+    onec = None
+    if not dry_run:
+        try:
+            onec = get_onec_service(config)
+        except Exception as e:
+            logger.warning("Не удалось инициализировать 1С: %s. Переход в режим аудита.", e)
+            dry_run = True
 
     driver = None
-    summary_data = []
+    audits: List[ShipmentAudit] = []
 
     try:
-        # 4. Запуск браузера и вход в Advantum
+        # 4. Запуск браузера и подключение к Advantum
         driver = create_driver(config, headless=config.headless)
         wait = login_to_advantum(driver, config)
         advantum = AdvantumService(driver, wait, config)
 
-        # 5. ОДНОКРАТНАЯ установка периода дат в календаре Advantum (Рейсы -> Все -> Календарь)
-        # Все последующие поиски рейсов будут выполняться в рамках этого установленного периода!
-        advantum.prepare_shipments_page(date_from, date_to)
-        main_handle = driver.current_window_handle
-
-        # 6. Последовательная обработка каждого рейса из входного списка
+        # 5. Выполнение аудита каждого рейса через API и трекинг
         for trip_idx, trip_num in enumerate(trips, start=1):
-            print("\n" + "=" * 76)
-            print(f" [{trip_idx}/{len(trips)}] ОБРАБОТКА РЕЙСА №{trip_num}")
-            print("=" * 76)
+            print("\n" + "=" * 78)
+            print(f" [{trip_idx}/{len(trips)}] АУДИТ РЕЙСА №{trip_num}...")
+            print("=" * 78)
 
-            # Переключаемся на основное окно Advantum со списком рейсов
             try:
-                driver.switch_to.window(main_handle)
-                if hasattr(driver, "bring_window_to_front"):
-                    driver.bring_window_to_front()
-            except Exception:
-                pass
+                shipment_audit = audit_shipment(driver, trip_num, geocoder)
+                audits.append(shipment_audit)
 
-            # Если текущий URL сместился с реестра рейсов — возвращаемся
-            if "control/shipments" not in driver.current_url:
-                driver.get("https://atms.advantum.ru/#/control/shipments")
-                time.sleep(2.5)
-                wait_overlays_gone(driver, timeout=8)
+                print(f" [Данные] Водитель:    {shipment_audit.driver_fio} ({shipment_audit.driver_phone})")
+                print(f" [Данные] Автомобиль:  {shipment_audit.vehicle_num} (ID: {shipment_audit.vehicle_id})")
+                print(f" [Данные] Точек всего: {shipment_audit.total_points} | Отбиты: {shipment_audit.ok_count} | Опоздания: {shipment_audit.near_count} | НЕ ПРОЙДЕНЫ: {shipment_audit.fail_count}")
+                print(f" [Данные] GPS-трек:    {shipment_audit.gps_points_count} отметок положения автомобиля")
 
-            # 6.1. Быстрый поиск рейса (меняем только номер в строке поиска без сброса дат!)
-            try:
-                advantum.find_and_select_trip(trip_num)
+                # Выводим в лог детали по всем проблемным точкам
+                non_ok_points = [p for p in shipment_audit.points if p.status_raw != "OK"]
+                if not non_ok_points:
+                    print(f" [Итог] Все точки рейса №{trip_num} успешно пройдены вовремя!")
+                else:
+                    for p in non_ok_points:
+                        print("\n" + "-" * 78)
+                        print(f" ТОЧКА №{p.index} [{p.code or 'нет кода'}]: {p.name}")
+                        print(f"   Адрес:     {p.address}")
+                        print(f"   Статус:    {p.status_title}")
+                        if p.adv_lat and p.adv_lon:
+                            print(f"   Координаты ЕИС:   {p.adv_lat:.8f}, {p.adv_lon:.8f}")
+                        if p.geo_lat and p.geo_lon:
+                            print(f"   Яндекс Карты:     {p.geo_lat:.8f}, {p.geo_lon:.8f} (смещение: {p.dist_adv_to_geo:.1f} м)")
+                        if p.min_dist_to_geo is not None:
+                            print(f"   Мин. сближение:   {p.min_dist_to_geo:.1f} м ({p.closest_time_geo or '—'})")
+                        print(f"   ВЕРДИКТ:   {p.verdict}")
+                        print(f"   ПРИЧИНА:   {p.reason}")
+                        print(f"   ДЕЙСТВИЕ:  {p.recommended_action}")
+
             except Exception as e:
-                logger.error("Рейс №%s: ошибка поиска (%s)", trip_num, e)
-                summary_data.append({
-                    "trip": trip_num,
-                    "failed": 0,
-                    "updated": 0,
-                    "recalc": "—",
-                    "status": "Не найден",
-                })
+                logger.error("Ошибка при аудите рейса №%s: %s", trip_num, e)
                 continue
 
-            # 6.2. Чтение списка неотбитых точек доставки ('Не пройдена')
-            try:
-                failed_points = advantum.get_failed_points()
-            except Exception as e:
-                logger.error("Рейс №%s: ошибка чтения списка точек (%s)", trip_num, e)
-                summary_data.append({
-                    "trip": trip_num,
-                    "failed": 0,
-                    "updated": 0,
-                    "recalc": "—",
-                    "status": "Ошибка чтения",
-                })
-                continue
-
-            if not failed_points:
-                print(f"\n[Итог] Рейс №{trip_num}: все точки успешно отбиты! Корректировка не требуется.\n")
-                summary_data.append({
-                    "trip": trip_num,
-                    "failed": 0,
-                    "updated": 0,
-                    "recalc": "—",
-                    "status": "Все отбиты",
-                })
-                continue
-
-            trip_points_updated = 0
-
-            # 6.3. Обработка каждой неотбитой точки рейса
-            for p in failed_points:
-                print("\n" + "-" * 76)
-                print(f" АНАЛИЗ ТОЧКИ №{p.index}: {p.name} (Код: {p.code or 'нет'})")
-                print(f" Адрес из Advantum: {p.address}")
-                print("-" * 76)
-
-                # Открываем трек водителя в Advantum (00..23 часа), центрируем на точке и считываем координаты
-                adv_pos = advantum.open_track_map(point_code=p.code, point_name=p.name)
-                adv_lat = adv_pos.get("lat")
-                adv_lon = adv_pos.get("lon")
-
-                # Открываем Яндекс Карты в соседней вкладке для визуального контроля
-                advantum.open_yandex_maps_tab(p.address)
-
-                # Возвращаем контекст WebDriver на основную вкладку реестра рейсов
-                try:
-                    driver.switch_to.window(main_handle)
-                except Exception:
-                    pass
-
-                # Получаем точные эталонные координаты здания через геокодер Яндекс Карт
-                try:
-                    geo_res = geocoder.geocode(p.address)
-                except Exception as e:
-                    logger.error("Не удалось геокодировать адрес '%s': %s", p.address, e)
+        # 6. Внесение изменений в 1С (только если отключен dry_run)
+        if not dry_run and onec is not None:
+            total_1c_updated = 0
+            for sa in audits:
+                needs_update = [p for p in sa.points if p.needs_1c_update]
+                if not needs_update:
                     continue
 
-                # Сравнение координат системы Advantum и Яндекс Карт
-                evaluation = evaluate_coordinates(
-                    original_lat=adv_lat,
-                    original_lon=adv_lon,
-                    target_lat=geo_res.lat,
-                    target_lon=geo_res.lon,
-                )
+                print("\n" + "=" * 78)
+                print(f" КОРРЕКТИРОВКА 1С ДЛЯ РЕЙСА №{sa.shipment_id} (Точек к обновлению: {len(needs_update)})")
+                print("=" * 78)
 
-                print("\n" + "." * 76)
-                print(" РЕЗУЛЬТАТ СРАВНЕНИЯ ЛОКАЦИЙ:")
-                print("." * 76)
-                if adv_lat and adv_lon:
-                    print(f" • Координаты в Advantum (на карте):   Широта: {adv_lat:.8f}, Долгота: {adv_lon:.8f}")
-                else:
-                    print(f" • Координаты в Advantum:             (отображаются на открытом треке в браузере)")
-                print(f" • Реальные координаты (Яндекс Карты):  Широта: {geo_res.lat:.8f}, Долгота: {geo_res.lon:.8f}")
-                if evaluation.get("distance_m") is not None:
-                    print(f" • Расхождение (дистанция ошибки):      {evaluation['distance_m']} м")
-                print(f" • Вердикт системы:                     {evaluation['reason']}")
-                print("." * 76)
-
-                # Обновление геоданных в 1С:Предприятие
-                if not dry_run:
+                trip_updated_count = 0
+                for p in needs_update:
+                    target_rad = p.recommended_radius or radius
+                    print(f" [1С] Обновление точки [{p.code}]: {p.name} -> {p.geo_lat:.8f}, {p.geo_lon:.8f}")
                     try:
                         success = onec.update_coordinates(
                             code=p.code,
                             address=p.address,
-                            lat=geo_res.lat,
-                            lon=geo_res.lon,
-                            radius=radius,
+                            lat=p.geo_lat,
+                            lon=p.geo_lon,
+                            radius=target_rad,
                             client_name=p.name,
                         )
+                        if success:
+                            trip_updated_count += 1
+                            total_1c_updated += 1
                     except Exception as e:
-                        print(f"\n [1С] ✗ ОШИБКА: {e}\n [1С] Точка '{p.name}' НЕ обновлена.")
-                        success = False
+                        logger.error("Ошибка обновления 1С для точки %s: %s", p.code, e)
 
-                    if success:
-                        trip_points_updated += 1
-                else:
-                    print(" [Dry-run] Запись в 1С пропущена.")
+                # Пересчет телематики в Advantum для этого рейса
+                if trip_updated_count > 0 and not no_recalc:
+                    print(f"\n [Advantum] Пересчет телематики для рейса №{sa.shipment_id}...")
+                    try:
+                        if "control/shipments" not in driver.current_url:
+                            driver.get("https://atms.advantum.ru/#/control/shipments")
+                            time.sleep(2.5)
+                            wait_overlays_gone(driver, timeout=8)
+                        advantum.find_and_select_trip(sa.shipment_id)
+                        advantum.recalculate_telematics(trip_number=sa.shipment_id)
+                    except Exception as e:
+                        logger.warning("Не удалось запустить пересчет в Advantum: %s", e)
 
-            # 6.4. Пересчет телематики в Advantum для текущего рейса (если были обновления)
-            recalc_status = "—"
-            if trip_points_updated > 0 and not no_recalc and not dry_run:
-                print(f"\n[Advantum] Возврат в окно рейсов и запуск пересчета телематики для рейса №{trip_num}...")
-                try:
-                    driver.switch_to.window(main_handle)
-                    if hasattr(driver, "bring_window_to_front"):
-                        driver.bring_window_to_front()
-                    time.sleep(1.0)
-
-                    if "control/shipments" not in driver.current_url:
-                        driver.get("https://atms.advantum.ru/#/control/shipments")
-                        time.sleep(2.5)
-                        wait_overlays_gone(driver, timeout=8)
-                        advantum.find_and_select_trip(trip_num)
-                except Exception as e:
-                    logger.debug("Возврат к таблице рейсов: %s", e)
-
-                time.sleep(1.0)
-                recalc_ok = advantum.recalculate_telematics(trip_number=trip_num)
-                if recalc_ok:
-                    recalc_status = "Успешно"
-                    print(f" [Advantum] ✓ Пересчет телематики для рейса №{trip_num} успешно запущен!")
-                else:
-                    recalc_status = "Не сработал"
-                    print(f" [Advantum] ⚠ Не удалось нажать кнопку пересчета для рейса №{trip_num}.")
-
-            summary_data.append({
-                "trip": trip_num,
-                "failed": len(failed_points),
-                "updated": trip_points_updated,
-                "recalc": recalc_status,
-                "status": "Успешно" if trip_points_updated > 0 else ("Проверено" if dry_run else "Без изменений"),
-            })
-
-        # 7. Итоговый отчет по всем обработанным рейсам
-        total_failed = sum(item["failed"] for item in summary_data)
-        total_updated = sum(item["updated"] for item in summary_data)
-
-        print("\n" + "=" * 78)
-        print("                 ИТОГОВЫЙ ОТЧЕТ ПАКЕТНОЙ ОБРАБОТКИ РЕЙСОВ")
-        print("=" * 78)
-        print(f" {'№':<3} | {'Рейс':<12} | {'Неотбитых':<10} | {'Обновлено 1С':<13} | {'Телематика':<12} | {'Статус':<15}")
-        print("-" * 78)
-        for i, item in enumerate(summary_data, start=1):
-            print(f" {i:<3} | {item['trip']:<12} | {item['failed']:<10} | {item['updated']:<13} | {item['recalc']:<12} | {item['status']:<15}")
-        print("=" * 78)
-        print(f" Обработано рейсов:           {len(trips)}")
-        print(f" Всего неотбитых точек:       {total_failed}")
-        print(f" Всего обновлено точек в 1С:  {total_updated}")
-        print("=" * 78 + "\n")
+        # 7. Генерация и сохранение полного экспертного отчета
+        if audits:
+            report_text = generate_audit_report_text(audits)
+            print("\n\n" + report_text + "\n")
+            report_file = save_audit_report_to_file(report_text)
+            print(f"[Успех] Полный текстовый отчет сохранен в файл: {report_file}")
+        else:
+            print("\n[Внимание] Данные аудита отсутствуют (рейсы не найдены).")
 
         if not args.headless:
-            input("[Пакетная обработка завершена] Нажмите Enter для закрытия браузера (или закройте вручную)...")
+            input("\n[Аудит завершен] Нажмите Enter для закрытия браузера (или закройте окно вручную)...")
 
     except KeyboardInterrupt:
         print("\n[Прервано пользователем]")
     except Exception as e:
-        logger.exception("Произошла ошибка во время работы: %s", e)
+        logger.exception("Критическая ошибка выполнения: %s", e)
     finally:
         if driver is not None:
             print("[Завершение] Закрытие браузера...")

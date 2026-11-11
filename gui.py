@@ -73,17 +73,17 @@ def show_batch_input_dialog(
     result = {}
 
     root = tk.Tk()
-    root.title("Пакетная корректировка координат (Advantum <-> 1С)")
-    root.geometry("540x520")
+    root.title("Аудит и диагностика причин неотбитых точек (Advantum <-> 1С)")
+    root.geometry("560x530")
     root.minsize(480, 460)
 
     # Центрирование окна
     root.update_idletasks()
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
-    x = max(50, (sw - 540) // 2)
-    y = max(50, (sh - 520) // 2)
-    root.geometry(f"540x520+{x}+{y}")
+    x = max(50, (sw - 560) // 2)
+    y = max(50, (sh - 530) // 2)
+    root.geometry(f"560x530+{x}+{y}")
 
     # Стили
     style = ttk.Style(root)
@@ -98,19 +98,22 @@ def show_batch_input_dialog(
     # 1. Заголовок
     header_lbl = ttk.Label(
         main_frame,
-        text="Параметры пакетной обработки рейсов",
+        text="Диагностика и аудит неотбитых точек рейсов",
         font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 13, "bold"),
     )
     header_lbl.pack(anchor="w", pady=(0, 4))
 
     desc_lbl = ttk.Label(
         main_frame,
-        text="Скрипт поочередно проверит неотбитые точки для каждого рейса,\n"
-             "сопоставит геоданные с Яндекс Картами, обновит 1С и пересчитает телематику.",
+        text="Скрипт проведет детальный аудит рейсов по GPS-треку водителя и геоданным:\n"
+             "• Определит, был ли водитель на адресе (по GPS-треку автомобиля)\n"
+             "• Выявит опоздания (нарушение планового временного окна доставки)\n"
+             "• Выявит ошибки координат ЕИС и недостаточный радиус зоны (парковки/шлагбаумы)\n"
+             "• Сформирует подробный отчет с точной причиной по каждой точке.",
         font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 9),
-        foreground="#555555",
+        foreground="#444444",
     )
-    desc_lbl.pack(anchor="w", pady=(0, 12))
+    desc_lbl.pack(anchor="w", pady=(0, 10))
 
     # 2. Поле ввода номеров рейсов
     trips_frame = ttk.LabelFrame(main_frame, text=" Номера рейсов ", padding="8 8 8 8")
@@ -153,28 +156,19 @@ def show_batch_input_dialog(
     entry_to.insert(0, d_to.strftime("%d.%m.%Y"))
     entry_to.grid(row=0, column=3, sticky="w", padx=(0, 8), pady=2)
 
-    # 4. Дополнительные опции
-    opts_frame = ttk.LabelFrame(main_frame, text=" Настройки обновления 1С ", padding="8 8 8 8")
+    # 4. Режим работы
+    opts_frame = ttk.LabelFrame(main_frame, text=" Режим выполнения ", padding="8 8 8 8")
     opts_frame.pack(fill=tk.X, pady=(0, 12))
 
-    radius_row = ttk.Frame(opts_frame)
-    radius_row.pack(fill=tk.X, pady=(0, 4))
-
-    ttk.Label(radius_row, text="Радиус зоны в 1С (м, опционально):").pack(side=tk.LEFT, padx=(0, 8))
-    entry_radius = ttk.Entry(radius_row, width=8, font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 10))
-    if default_radius:
-        entry_radius.insert(0, str(default_radius))
-    entry_radius.pack(side=tk.LEFT)
-
-    dry_run_var = tk.BooleanVar(value=False)
+    dry_run_var = tk.BooleanVar(value=True)
     no_recalc_var = tk.BooleanVar(value=False)
 
     chk_dry = ttk.Checkbutton(
         opts_frame,
-        text="Только аудит (Dry-run — не вносить изменения в 1С)",
+        text="Только аудит и отчет (Рекомендуется — не вносить изменения в 1С)",
         variable=dry_run_var,
     )
-    chk_dry.pack(anchor="w", pady=(4, 2))
+    chk_dry.pack(anchor="w", pady=(2, 2))
 
     chk_recalc = ttk.Checkbutton(
         opts_frame,
@@ -182,6 +176,14 @@ def show_batch_input_dialog(
         variable=no_recalc_var,
     )
     chk_recalc.pack(anchor="w", pady=(0, 2))
+
+    radius_row = ttk.Frame(opts_frame)
+    radius_row.pack(fill=tk.X, pady=(4, 2))
+    ttk.Label(radius_row, text="Тестовый радиус зоны (м, опционально):").pack(side=tk.LEFT, padx=(0, 8))
+    entry_radius = ttk.Entry(radius_row, width=8, font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 10))
+    if default_radius:
+        entry_radius.insert(0, str(default_radius))
+    entry_radius.pack(side=tk.LEFT)
 
     # 5. Кнопки управления
     btn_frame = ttk.Frame(main_frame)

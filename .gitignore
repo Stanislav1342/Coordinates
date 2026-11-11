@@ -17,6 +17,7 @@ Thumbs.db
 
 # Logs
 *.log
+audit_report_*.txt
 
 # IDE
 .idea/

@@ -576,11 +576,19 @@ class AdvantumService:
                     if (card) {
                         var pinBtn = card.querySelector('button, svg, [class*="target"], [class*="gps"]');
                         if (pinBtn) {
-                            pinBtn.click();
+                            if (typeof pinBtn.click === 'function') {
+                                pinBtn.click();
+                            } else if (typeof card.click === 'function') {
+                                card.click();
+                            } else {
+                                pinBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+                            }
                             return {clicked: 'pin_button'};
                         }
-                        card.click();
-                        return {clicked: 'card'};
+                        if (typeof card.click === 'function') {
+                            card.click();
+                            return {clicked: 'card'};
+                        }
                     }
                 }
                 return {clicked: false};
