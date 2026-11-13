@@ -49,7 +49,6 @@ def clean_address_for_search(raw_address: str) -> str:
         r",?\s*(?:ворота|рампа|кпп)\s*№?\s*\d+",
         r",?\s*этаж\s*№?\s*\d+",
         r",?\s*офис\s*№?\s*\d+",
-        r",?\s*территория\s*Многофункциональный\s*Логистический\s*Парк",
     ]
     for pattern in patterns_to_remove:
         addr = re.sub(pattern, "", addr, flags=re.IGNORECASE)
@@ -135,19 +134,12 @@ class YandexGeocoder:
     def geocode(self, address: str) -> GeocodeResult:
         """
         Геокодирует адрес.
-        1. Если задан YANDEX_MAPS_API_KEY — использует официальный HTTP API Яндекса.
-        2. Иначе использует прямой поиск Яндекс Карт (без API-ключа).
-        3. Если не удалось — fallback на Nominatim.
+        1. Использует прямой поиск Яндекс Карт (без API-ключа).
+        2. Если не удалось — fallback на Nominatim.
         """
         clean_addr = clean_address_for_search(address)
 
-        if self.api_key:
-            try:
-                return self._geocode_yandex_api(clean_addr)
-            except Exception as e:
-                logger.warning("Ошибка Yandex API (%s), переход на прямой поиск...", e)
-
-        # Прямой поиск через веб-сервис Яндекс Карт (надежно, без 403, точно для РФ)
+        # Прямой поиск через веб-сервис Яндекс Карт (надежно, без API-ключа и 403, точно для РФ)
         try:
             return self._geocode_yandex_web(clean_addr)
         except Exception as e:
