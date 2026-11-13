@@ -148,10 +148,6 @@ def main():
         if not gui_res:
             return
         trips = gui_res["trips"]
-        d_from = gui_res["date_from"]
-        d_to = gui_res["date_to"]
-        date_from = d_from.date() if isinstance(d_from, datetime.datetime) else d_from
-        date_to = d_to.date() if isinstance(d_to, datetime.datetime) else d_to
         radius = gui_res["radius"]
         dry_run = gui_res["dry_run"]
         no_recalc = gui_res["no_recalc"]
@@ -159,8 +155,6 @@ def main():
         initial_trips = args.trip if args.trip else None
         gui_res = show_batch_input_dialog(
             default_trips=initial_trips,
-            default_date_from=datetime.datetime.combine(args.date_from, datetime.time.min),
-            default_date_to=datetime.datetime.combine(args.date_to, datetime.time.min),
             default_radius=args.radius,
         )
         if not gui_res:
@@ -168,10 +162,6 @@ def main():
             return
 
         trips = gui_res["trips"]
-        d_from = gui_res["date_from"]
-        d_to = gui_res["date_to"]
-        date_from = d_from.date() if isinstance(d_from, datetime.datetime) else d_from
-        date_to = d_to.date() if isinstance(d_to, datetime.datetime) else d_to
         radius = gui_res["radius"]
         dry_run = gui_res["dry_run"]
         no_recalc = gui_res["no_recalc"]

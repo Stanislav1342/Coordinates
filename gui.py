@@ -45,9 +45,9 @@ def parse_date_str(val: str, default: datetime) -> datetime:
 
 
 def prompt_trips_cli(default_days: int = 7) -> Optional[dict]:
-    """Терминальный ввод номеров рейсов и параметров без открытия окна."""
+    """Терминальный ввод номеров рейсов без открытия окна."""
     print("\n" + "=" * 64)
-    print("       ВВОД ПАРАМЕТРОВ АУДИТА РЕЙСОВ В ТЕРМИНАЛЕ")
+    print("       ВВОД НОМЕРОВ РЕЙСОВ ДЛЯ АУДИТА В ТЕРМИНАЛЕ")
     print("=" * 64)
     try:
         raw_trips = input(" Номера рейсов (через пробел или запятую): ").strip()
@@ -56,22 +56,8 @@ def prompt_trips_cli(default_days: int = 7) -> Optional[dict]:
             print(" [Отмена] Рейсы не указаны.")
             return None
 
-        today = datetime.now()
-        def_from = (today - timedelta(days=default_days)).strftime("%d.%m.%Y")
-        def_to = today.strftime("%d.%m.%Y")
-
-        str_from = input(f" Дата начала [{def_from}]: ").strip() or def_from
-        str_to = input(f" Дата окончания [{def_to}]: ").strip() or def_to
-
-        dt_from = parse_date_str(str_from, today - timedelta(days=default_days))
-        dt_to = parse_date_str(str_to, today)
-        if dt_from > dt_to:
-            dt_from, dt_to = dt_to, dt_from
-
         return {
             "trips": trips,
-            "date_from": dt_from,
-            "date_to": dt_to,
             "dry_run": True,
             "no_recalc": True,
             "radius": None,
@@ -88,7 +74,7 @@ def show_batch_input_dialog(
     default_radius: Optional[int] = None,
 ) -> Optional[dict]:
     """
-    Открывает компактное графическое окно (Tkinter) для ввода списка рейсов и периода.
+    Открывает компактное графическое окно (Tkinter) для ввода списка рейсов.
     Кнопки гарантированно видны внизу экрана, а Ctrl+V работает на любой раскладке.
     """
     try:
@@ -97,24 +83,21 @@ def show_batch_input_dialog(
     except ImportError:
         return prompt_trips_cli()
 
-    now = datetime.now()
-    d_to = default_date_to or now
-    d_from = default_date_from or (d_to - timedelta(days=7))
     initial_trips_str = "\n".join(default_trips) if default_trips else ""
 
     result = {}
     root = tk.Tk()
     root.title("Аудит рейсов Advantum")
-    root.geometry("480x300")
-    root.minsize(420, 250)
+    root.geometry("460x240")
+    root.minsize(400, 210)
 
     # Центрирование окна
     root.update_idletasks()
     sw = root.winfo_screenwidth()
     sh = root.winfo_screenheight()
-    x = max(50, (sw - 480) // 2)
-    y = max(50, (sh - 300) // 2)
-    root.geometry(f"480x300+{x}+{y}")
+    x = max(50, (sw - 460) // 2)
+    y = max(50, (sh - 240) // 2)
+    root.geometry(f"460x240+{x}+{y}")
 
     style = ttk.Style(root)
     try:
@@ -141,14 +124,7 @@ def show_batch_input_dialog(
             )
             return
 
-        dt_from = parse_date_str(entry_from.get().strip(), d_from)
-        dt_to = parse_date_str(entry_to.get().strip(), d_to)
-        if dt_from > dt_to:
-            dt_from, dt_to = dt_to, dt_from
-
         result["trips"] = parsed
-        result["date_from"] = dt_from
-        result["date_to"] = dt_to
         result["dry_run"] = True
         result["no_recalc"] = True
         result["radius"] = None
@@ -184,33 +160,9 @@ def show_batch_input_dialog(
         relief="solid",
         borderwidth=1,
     )
-    trips_text.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+    trips_text.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
 
-    # 3. Выбор диапазона дат
-    dates_frame = ttk.Frame(main_frame)
-    dates_frame.pack(fill=tk.X, pady=(0, 4))
-
-    ttk.Label(
-        dates_frame,
-        text="Период с:",
-        font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 9),
-    ).grid(row=0, column=0, sticky="w", padx=(0, 6))
-
-    entry_from = ttk.Entry(dates_frame, width=12, font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 10))
-    entry_from.insert(0, d_from.strftime("%d.%m.%Y"))
-    entry_from.grid(row=0, column=1, sticky="w", padx=(0, 20))
-
-    ttk.Label(
-        dates_frame,
-        text="по:",
-        font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 9),
-    ).grid(row=0, column=2, sticky="w", padx=(0, 6))
-
-    entry_to = ttk.Entry(dates_frame, width=12, font=("Segoe UI" if sys.platform == "win32" else "Helvetica", 10))
-    entry_to.insert(0, d_to.strftime("%d.%m.%Y"))
-    entry_to.grid(row=0, column=3, sticky="w")
-
-    # 4. НАДЕЖНАЯ ОБРАБОТКА Ctrl+V И ГОРЯЧИХ КЛАВИШ НА ЛЮБОЙ РАСКЛАДКЕ
+    # 3. НАДЕЖНАЯ ОБРАБОТКА Ctrl+V И ГОРЯЧИХ КЛАВИШ НА ЛЮБОЙ РАСКЛАДКЕ
     def paste_clipboard():
         try:
             content = root.clipboard_get()
@@ -259,8 +211,6 @@ def show_batch_input_dialog(
     trips_text.bind("<KeyPress>", on_key_event)
     root.bind("<Control-Return>", lambda e: on_submit())
     root.bind("<Escape>", lambda e: on_cancel())
-    entry_from.bind("<Return>", lambda e: on_submit())
-    entry_to.bind("<Return>", lambda e: on_submit())
 
     # Контекстное меню по правому клику мыши
     ctx_menu = tk.Menu(trips_text, tearoff=0)
