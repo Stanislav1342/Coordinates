@@ -28,7 +28,7 @@ class Config:
     browser_path_fallback: str = ""
     download_dir: str = ""
     chromedriver_version: str | None = None
-    headless: bool = False
+    headless: bool = True
 
     # Таймауты (секунды)
     default_timeout: int = 20
@@ -80,7 +80,8 @@ def load_config(env_path: str | None = None) -> Config:
         r"C:\Program Files (x86)\Yandex\YandexBrowser\Application\browser.exe",
     )
 
-    headless_val = os.environ.get("HEADLESS", "").strip().lower() in ("true", "1", "yes")
+    env_headless = os.environ.get("HEADLESS", "").strip().lower()
+    headless_val = False if env_headless in ("false", "0", "no") else True
 
     return Config(
         login=os.environ.get("ADVANTUM_LOGIN", ""),

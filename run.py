@@ -125,7 +125,12 @@ def main():
     parser.add_argument(
         "--headless",
         action="store_true",
-        help="Запустить браузер в фоновом (headless) режиме",
+        help="Запустить браузер в фоновом (headless) режиме (включено по умолчанию)",
+    )
+    parser.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="Показывать окно браузера вместо фонового headless-режима",
     )
 
     args = parser.parse_args()
@@ -184,7 +189,9 @@ def main():
 
     # 2. Загрузка конфигурации
     config = load_config()
-    if args.headless:
+    if args.show_browser:
+        config.headless = False
+    elif args.headless:
         config.headless = True
 
     print("\n" + "=" * 78)
@@ -284,9 +291,6 @@ def main():
             print("\n\n" + report_text + "\n")
         else:
             print("\n[Внимание] Данные аудита отсутствуют (рейсы не найдены).")
-
-        if not args.headless:
-            input("\n[Аудит завершен] Нажмите Enter для закрытия браузера (или закройте окно вручную)...")
 
     except KeyboardInterrupt:
         print("\n[Прервано пользователем]")
