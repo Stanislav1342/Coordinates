@@ -49,11 +49,18 @@ def clean_address_for_search(raw_address: str) -> str:
         r",?\s*(?:ворота|рампа|кпп)\s*№?\s*\d+",
         r",?\s*этаж\s*№?\s*\d+",
         r",?\s*офис\s*№?\s*\d+",
-        r",?\s*№\s*[А-Яа-яA-Za-z0-9]+",
         r",?\s*территория\s*Многофункциональный\s*Логистический\s*Парк",
     ]
     for pattern in patterns_to_remove:
         addr = re.sub(pattern, "", addr, flags=re.IGNORECASE)
+    # Убираем знак "№" после слов дом/корп/стр (например, "дом № 32" -> "дом 32"),
+    # не удаляя сам номер дома/корпуса!
+    addr = re.sub(
+        r"\b(дом|д\.?|корпус|корп\.?|строение|стр\.?|владение|вл\.?)\s*№\s*",
+        r"\1 ",
+        addr,
+        flags=re.IGNORECASE,
+    )
     addr = re.sub(r"\s*,\s*,+", ",", addr)
     return re.sub(r"\s+", " ", addr).strip(" ,")
 

@@ -323,6 +323,20 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
     vehicle_stops = extract_vehicle_stops(track_list)
     has_gaps = detect_gps_gaps(track_list)
 
+    # Для каждой стоянки определяем минимальное расстояние до ближайшей точки рейса,
+    # чтобы стоянка у соседней аптеки не приписывалась другой точке
+    for s in vehicle_stops:
+        min_d = 999999.0
+        for pt_item in points_list:
+            loc_pt = (pt_item.get("location") or {}).get("point") or {}
+            pt_lat = loc_pt.get("latitude")
+            pt_lon = loc_pt.get("longitude")
+            if pt_lat and pt_lon:
+                d = haversine_distance(s["lat"], s["lon"], pt_lat, pt_lon)
+                if d < min_d:
+                    min_d = d
+        s["min_pt_dist"] = min_d
+
     shipment_audit = ShipmentAudit(
         shipment_id=str(shipment_id),
         driver_fio=shipment_obj.get("driverFio") or "Не указан",
@@ -416,18 +430,16 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
             logger.warning("Геокодирование адреса '%s' не удалось: %s", address, e)
 
         # -------------------------------------------------------------
-        # 2. СКАН ТРЕКА: МАКСИМАЛЬНОЕ СБЛИЖЕНИЕ И КЛАСТЕРИЗАЦИЯ ПРОЕЗДОВ
+        # 2. СКАН ТРЕКА: МАКСИМАЛЬНОЕ СБЛИЖЕНИЕ И РЕАЛЬНЫЕ СТОЯНКИ У ТОЧКИ
         # -------------------------------------------------------------
         min_dist_to_geo = 999999.0
         closest_time_geo = ""
         min_dist_to_adv = 999999.0
         closest_time_adv = ""
-        approaches = []
 
         for pt in parsed_track:
             t_lat = pt["lat"]
             t_lon = pt["lon"]
-            t_msk = pt["time_msk"]
             t_str = pt["time_str"]
 
             da = haversine_distance(t_lat, t_lon, adv_lat, adv_lon) if adv_lat and adv_lon else 999999.0
@@ -440,59 +452,47 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
                 min_dist_to_geo = dg
                 closest_time_geo = t_str
 
-            d_min = min(da, dg)
-            if d_min <= 180.0:
-                approaches.append({
-                    "time_msk": t_msk,
-                    "time_str": t_str,
-                    "dist": d_min,
-                    "speed": pt["speed"],
-                })
-
         p_audit.min_dist_to_geo = min_dist_to_geo if min_dist_to_geo < 900000 else None
         p_audit.closest_time_geo = closest_time_geo
         p_audit.min_dist_to_adv = min_dist_to_adv if min_dist_to_adv < 900000 else None
         p_audit.closest_time_adv = closest_time_adv
 
-        # Кластеризуем сближения в отдельные проезды/заезды (разрыв > 10 минут)
-        passes = []
-        curr_pass = []
-        for app in approaches:
-            if not curr_pass:
-                curr_pass.append(app)
-            else:
-                if (app["time_msk"] - curr_pass[-1]["time_msk"]).total_seconds() > 600:
-                    passes.append(curr_pass)
-                    curr_pass = [app]
-                else:
-                    curr_pass.append(app)
-        if curr_pass:
-            passes.append(curr_pass)
+        # Ищем реальные непрерывные стоянки (speed < 5 км/ч >= 1.5 мин) строго в радиусе 150 м от точки ЕИС
+        # (или от Яндекса, только если расхождение с ЕИС <= 200 м)
+        has_confirmed_eis_stop = False
+        own_stops = []
+        for s in vehicle_stops:
+            d_adv = haversine_distance(s["lat"], s["lon"], adv_lat, adv_lon) if adv_lat and adv_lon else 999999.0
+            if d_adv <= 150.0:
+                has_confirmed_eis_stop = True
+            d_ref = d_adv
+            if (
+                p_audit.geo_lat
+                and p_audit.geo_lon
+                and p_audit.dist_adv_to_geo is not None
+                and p_audit.dist_adv_to_geo <= 200.0
+            ):
+                d_geo = haversine_distance(s["lat"], s["lon"], p_audit.geo_lat, p_audit.geo_lon)
+                d_ref = min(d_adv, d_geo)
 
-        # Проверяем наличие фактического заезда/стоянки внутри планового окна доставки
-        in_window_pass = None
-        for ps in passes:
-            ps_t0 = ps[0]["time_msk"]
-            ps_t1 = ps[-1]["time_msk"]
-            min_spd = min(p["speed"] for p in ps)
-            min_dst = min(p["dist"] for p in ps)
-            dur_min = (ps_t1 - ps_t0).total_seconds() / 60.0
-            has_stop = (min_spd < 5 and dur_min >= 1.0) or any(p["speed"] == 0 for p in ps)
+            if d_ref <= 150.0 and d_adv <= (s.get("min_pt_dist", 999999.0) + 25.0):
+                own_stops.append((d_ref, s))
 
-            # Проверяем попадание в плановое окно [plan_t0 - 15 мин, plan_t1 + 5 мин]
-            if plan_t0 and plan_t1:
-                w_start = plan_t0 - timedelta(minutes=15)
-                w_end = plan_t1 + timedelta(minutes=5)
-                if not (ps_t1 < w_start or ps_t0 > w_end):
-                    if has_stop or min_spd < 15:
-                        in_window_pass = {
-                            "start_dt": ps_t0,
-                            "end_dt": ps_t1,
-                            "min_dist": min_dst,
-                            "min_speed": min_spd,
-                            "dur_min": max(dur_min, 1.0),
-                        }
-                        break
+        own_stops.sort(key=lambda item: item[1]["start_dt"])
+
+        # Если водитель стоял у координат ЕИС (>1.5 мин, <=150м), а Яндекс выдал центр промзоны/ТЦ >200м — доверяем треку
+        if has_confirmed_eis_stop and p_audit.dist_adv_to_geo is not None and p_audit.dist_adv_to_geo > 200:
+            p_audit.coord_status = "CONFIRMED_BY_TRACK"
+
+        # Ищем стоянку в плановое окно доставки (именно реальную стоянку, а не транзитный проезд!)
+        in_window_stop = None
+        earliest_own_stop = own_stops[0] if own_stops else None
+        if plan_t0 and plan_t1:
+            for d_ref, s in own_stops:
+                # Водитель прибыл на стоянку до окончания планового окна (или выехал после его начала)
+                if s["start_dt"] <= plan_t1 and s["end_dt"] >= plan_t0:
+                    in_window_stop = (d_ref, s)
+                    break
 
         # -------------------------------------------------------------
         # 3. ПОИСК СТОЯНОК ВОДИТЕЛЯ В РАДИУСЕ ДО 3500 М (ДЛЯ СКЛАДОВ)
@@ -540,7 +540,7 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
         # -------------------------------------------------------------
         # СЦЕНАРИЙ 1: Статус OK (отбита вовремя в Advantum)
         if tag == "OK":
-            if p_audit.dist_adv_to_geo is not None and p_audit.dist_adv_to_geo > 200:
+            if p_audit.coord_status == "CRITICAL_OFFSET":
                 p_audit.verdict = "✓ Пройдена вовремя (⚠ Критическое смещение координат в ЕИС)"
                 p_audit.reason = (
                     f"Телематический заезд зарегистрирован вовремя (в {fact_start_str} МСК). "
@@ -552,7 +552,7 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
                     f"Широта={p_audit.geo_lat:.8f}, Долгота={p_audit.geo_lon:.8f}"
                 )
                 p_audit.needs_1c_update = True
-            elif p_audit.dist_adv_to_geo is not None and p_audit.dist_adv_to_geo >= 30:
+            elif p_audit.coord_status == "MODERATE_OFFSET":
                 p_audit.verdict = "✓ Пройдена вовремя (⚠ Неточность координат в ЕИС)"
                 p_audit.reason = (
                     f"Телематический заезд зарегистрирован вовремя (в {fact_start_str} МСК). "
@@ -563,6 +563,14 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
                     f"Рекомендуется уточнить координаты в 1С по зданию: "
                     f"{p_audit.geo_lat:.8f}, {p_audit.geo_lon:.8f} (во избежание ложных несработок телематики)."
                 )
+                p_audit.needs_1c_update = False
+            elif p_audit.coord_status == "CONFIRMED_BY_TRACK":
+                p_audit.verdict = "✓ Пройдена вовремя"
+                p_audit.reason = (
+                    f"Телематический заезд зарегистрирован вовремя (в {fact_start_str} МСК) и подтвержден стоянкой у координат ЕИС "
+                    f"(поиск Яндекса указал на центр района/ТЦ со смещением {p_audit.dist_adv_to_geo:.0f} м)."
+                )
+                p_audit.recommended_action = "Корректировка не требуется (координаты ЕИС подтверждены стоянкой)."
                 p_audit.needs_1c_update = False
             else:
                 p_audit.verdict = "✓ Пройдена вовремя"
@@ -575,25 +583,22 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
 
         # СЦЕНАРИЙ 2: Статус NEAR (Непопадание в окно / Опоздание)
         if tag == "NEAR":
-            if in_window_pass:
-                # Водитель фактически выгрузился вовремя, а Advantum записал повторный проезд!
+            if in_window_stop:
+                # Водитель фактически выгрузился вовремя (непрерывная стоянка в плановом окне), а Advantum записал повторный проезд!
+                d_ref, s = in_window_stop
                 p_audit.is_false_late = True
                 shipment_audit.false_late_count += 1
-                w_t0_str = format_msk(in_window_pass["start_dt"])
-                w_t1_str = format_msk(in_window_pass["end_dt"])
-                w_dur = in_window_pass["dur_min"]
-                w_dist = in_window_pass["min_dist"]
-                p_audit.actual_visit_in_window = f"{w_t0_str}–{w_t1_str} МСК (стоянка {w_dur:.1f} мин, удаление {w_dist:.0f} м)"
+                p_audit.actual_visit_in_window = f"{s['start']}–{s['end']} МСК (стоянка {s['duration_min']} мин, удаление {d_ref:.0f} м)"
                 p_audit.verdict = "✓ ФАКТИЧЕСКИ ВОВРЕМЯ (ЛОЖНОЕ ОПОЗДАНИЕ В ADVANTUM)"
                 p_audit.reason = (
-                    f"Фактическая доставка выполнена ВОВРЕМЯ: водитель был на объекте в {w_t0_str}–{w_t1_str} МСК "
-                    f"(стоянка {w_dur:.1f} мин, сближение {w_dist:.0f} м), что строго внутри планового интервала "
+                    f"Фактическая доставка выполнена ВОВРЕМЯ: водитель выполнил реальную стоянку у объекта в {s['start']}–{s['end']} МСК "
+                    f"(стоянка {s['duration_min']} мин, сближение {d_ref:.0f} м), что внутри планового интервала "
                     f"доставки ({plan_start_str}—{plan_finish_str} МСК). "
                     f"В {fact_start_str} МСК система Advantum зафиксировала повторный транзитный проезд автомобиля "
                     f"и ошибочно приняла его за время прибытия."
                 )
-                if p_audit.dist_adv_to_geo is not None and p_audit.dist_adv_to_geo >= 30:
-                    p_audit.reason += f" При этом в ЕИС координаты смещены на {p_audit.dist_adv_to_geo:.0f} м от здания (точка стоит на проезжей части / парковке)."
+                if p_audit.coord_status == "MODERATE_OFFSET":
+                    p_audit.reason += f" При этом в ЕИС координаты смещены на {p_audit.dist_adv_to_geo:.0f} м от здания (точка на проезжей части / парковке)."
                     p_audit.recommended_action = (
                         f"Фактическая доставка выполнена в срок (снять штраф за опоздание). "
                         f"Рекомендуется скорректировать координаты в 1С: {p_audit.geo_lat:.8f}, {p_audit.geo_lon:.8f}."
@@ -602,13 +607,28 @@ def audit_shipment(driver, shipment_id: str, geocoder: YandexGeocoder) -> Shipme
                     p_audit.recommended_action = "Фактическая доставка выполнена в срок. В логистических отчетах и штрафах зафиксировать своевременную выгрузку."
                 p_audit.needs_1c_update = False
             else:
-                # Реальное опоздание (заезд только вне планового интервала)
+                # Реальное опоздание (проверяем, не сдвинул ли Advantum реальное время стоянки на более поздний транзитный проезд)
+                earlier_note = ""
+                if earliest_own_stop and fact_t0:
+                    ed_ref, es = earliest_own_stop
+                    if (fact_t0 - es["start_dt"]).total_seconds() > 180:
+                        earlier_note = (
+                            f" Реальная стоянка у объекта зафиксирована раньше: {es['start']}–{es['end']} МСК "
+                            f"({es['duration_min']} мин, удаление {ed_ref:.0f} м), а {fact_start_str} МСК — повторный проезд."
+                        )
+
                 p_audit.verdict = "⚠ Нарушение временного окна (Опоздание)"
                 p_audit.reason = (
                     f"Водитель прибыл на объект в {fact_start_str} МСК вне планового интервала доставки "
-                    f"(План: {plan_start_str}—{plan_finish_str} МСК)."
+                    f"(План: {plan_start_str}—{plan_finish_str} МСК).{earlier_note}"
                 )
-                if p_audit.dist_adv_to_geo is not None and p_audit.dist_adv_to_geo >= 30:
+                if p_audit.coord_status == "CONFIRMED_BY_TRACK":
+                    p_audit.reason += (
+                        f" Координаты ЕИС подтверждены фактической стоянкой у объекта "
+                        f"(Яндекс указал на центр района/ТЦ со смещением {p_audit.dist_adv_to_geo:.0f} м)."
+                    )
+                    p_audit.recommended_action = "Координаты подтверждены стоянкой. Требуется согласование времени с логистикой."
+                elif p_audit.coord_status in ("MODERATE_OFFSET", "CRITICAL_OFFSET"):
                     p_audit.reason += f" Координаты точки в ЕИС смещены на {p_audit.dist_adv_to_geo:.0f} м от здания (точка на проезжей части / парковке)."
                     p_audit.recommended_action = (
                         f"Согласовать время с логистикой/клиентом. "
@@ -750,7 +770,9 @@ def generate_audit_report_text(audits: List[ShipmentAudit]) -> str:
             if p.geo_lat and p.geo_lon:
                 lines.append(f"   Яндекс Карты:   {p.geo_lat:.8f}, {p.geo_lon:.8f}")
                 if p.dist_adv_to_geo is not None:
-                    if p.dist_adv_to_geo < 30:
+                    if p.coord_status == "CONFIRMED_BY_TRACK":
+                        offset_desc = "координаты ЕИС подтверждены стоянкой у объекта"
+                    elif p.dist_adv_to_geo < 30:
                         offset_desc = "точно на здании"
                     elif p.dist_adv_to_geo <= 200:
                         offset_desc = "на проезжей части / парковке"
